@@ -21,7 +21,7 @@ public class WorkerScreen : UserControl
     static readonly int[] InfoWidths  = [40, 37, 37, 35, 90, 120, 50];
     static readonly int   DateWidth   = 58;   // 출퇴근 시각("18-22") 표시용
     static readonly int[] SumWidths   = [56, 56, 56, 62, 72, 66, 72, 66, 66, 62, 72];
-    static readonly string[] InfoHdrs = ["☑\n전체", "금액\n자동", "휴게\n자동", "순번", "성명\n전화번호", "생년월일6자리\n거주지역", "근무\n시작일"];
+    static readonly string[] InfoHdrs = ["☐\n전체", "금액\n자동", "휴게\n자동", "순번", "성명\n전화번호", "생년월일6자리\n거주지역", "근무\n시작일"];
     static readonly string[] SumHdrs  = ["근무시간\n근무일수", "주휴시간\n휴일시간", "연장시간\n야간시간", "시급\n최저미달", "기본급\n주휴수당", "연장수당\n야간수당", "휴일수당\n임금총액", "국민연금\n건강보험", "고용보험\n요양보험", "소득세\n주민세", "공제합계\n차감지급액"];
 
     // ── DB 인덱스 (PayCols) ───────────────────────────────
@@ -86,6 +86,11 @@ public class WorkerScreen : UserControl
     Label        _lblStatus = null!;
     TextBox      _txtWarn  = null!;
     Panel        _pnlWarn  = null!;
+    ComboBox     _cmbTimes = null!;          // 시간 목록(주간 근무표와 공용)
+
+    // 시간 프리셋 + 날짜 셀 콤보에 들어 있는 표시값
+    List<string> _presets = [];
+    readonly HashSet<string> _timeOptions = [];
 
     public WorkerScreen()
     {
@@ -124,6 +129,23 @@ public class WorkerScreen : UserControl
         btnSave.BackColor = Color.FromArgb(30, 100, 60);
         btnSave.ForeColor = Color.White;
         flow.Controls.Add(btnSave);
+
+        // 시간 목록 관리 — 주간 근무표와 같은 프리셋을 쓴다
+        flow.Controls.Add(new Label
+        {
+            Text = "시간 목록 →", AutoSize = true, Margin = new Padding(18, 8, 6, 0),
+            Font = ThemeManager.F(9f), ForeColor = ThemeManager.TextSub, BackColor = Color.Transparent,
+        });
+        _cmbTimes = new ComboBox
+        {
+            Width = 140, DropDownStyle = ComboBoxStyle.DropDown,   // 편집 가능 → 직접 입력
+            Font = ThemeManager.F(9f), Margin = new Padding(0, 4, 6, 0),
+        };
+        _cmbTimes.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; AddTime(); } };
+        flow.Controls.Add(_cmbTimes);
+        flow.Controls.Add(MakeToolBtn("＋ 시간추가", 92, AddTime));
+        flow.Controls.Add(MakeToolBtn("－ 시간삭제", 92, DeleteTime));
+
         // Bottom 먼저 추가 → Fill이 나머지 공간 차지
         p.Controls.Add(sep);
         p.Controls.Add(flow);
@@ -174,6 +196,10 @@ public class WorkerScreen : UserControl
         _grid.KeyDown              += OnGridKeyDown;
         _grid.ClipboardCopyMode     = DataGridViewClipboardCopyMode.Disable;
         _grid.ColumnHeaderMouseClick += OnHeaderClick;
+        _grid.DataError += (_, e) => { e.ThrowException = false; };   // 콤보 값 불일치 무시
+        _grid.CurrentCellDirtyStateChanged += (_, _) =>               // 콤보 선택 즉시 커밋
+        { if (_grid.IsCurrentCellDirty) _grid.CommitEdit(DataGridViewDataErrorContexts.Commit); };
+        _grid.CellValueChanged += OnCellValueChanged;
         return _grid;
     }
 
@@ -246,15 +272,18 @@ public class WorkerScreen : UserControl
             _grid.Columns.Add(col);
         }
 
-        // DATE 컬럼 (7-22)
+        // DATE 컬럼 (7-22): 시간 목록에서 골라 넣는다 (직접 타이핑 대신)
         for (int s = 0; s < N_DATES; s++)
         {
-            var col = new DataGridViewTextBoxColumn
+            var col = new DataGridViewComboBoxColumn
             {
-                HeaderText = "",
-                Width      = DateWidth,
-                ReadOnly   = false,
-                SortMode   = DataGridViewColumnSortMode.NotSortable,
+                HeaderText   = "",
+                Width        = DateWidth,
+                ReadOnly     = false,
+                SortMode     = DataGridViewColumnSortMode.NotSortable,
+                FlatStyle    = FlatStyle.Flat,
+                DisplayStyle = DataGridViewComboBoxDisplayStyle.Nothing,  // 셀은 직접 그린다
+                AutoComplete = false,
             };
             col.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
             col.HeaderCell = new MultiLineHeaderCell { Value = "" };
@@ -288,6 +317,8 @@ public class WorkerScreen : UserControl
         _customHolidays.Clear();
         LoadSettings();
         LoadWorkers();
+        RefreshTimeOptions();
+        _grid.Columns[0].HeaderCell.Value = "☐\n전체";   // 전체선택은 기억하지 않는다
         // 로드 시 현재 법정기준(최저임금·요율 등)으로 자동계산 재실행
         //  → 나중에 최저임금을 바꿔도 '최저미달' 등 파생값이 반영된다.
         for (int wi = 0; wi < _workers.Count; wi++)
@@ -343,9 +374,34 @@ public class WorkerScreen : UserControl
         catch { }
     }
 
+    // 전체근로자(시급 원본)를 이름+전화번호로 조회. 한 번만 읽어서 캐시한다.
+    Dictionary<string, string>? _masterWages;
+
+    string MasterWage(string name, string phone)
+    {
+        if (_masterWages == null)
+        {
+            _masterWages = [];
+            try
+            {
+                using var db = new Database(AppConfig.BaseDbPath);
+                db.EnsureTable("전체근로자", AppConfig.WorkerCols);
+                var (cols, rows) = db.SelectStrings("전체근로자");
+                int ni = Array.IndexOf(cols, "이름"), pi = Array.IndexOf(cols, "전화번호");
+                int wi = Array.IndexOf(cols, "시급");
+                string V(string[] r, int i) => i >= 0 && i < r.Length ? r[i] : "";
+                foreach (var r in rows)
+                    _masterWages[AppConfig.WorkerKey(V(r, ni), V(r, pi))] = V(r, wi);
+            }
+            catch { }
+        }
+        return _masterWages.GetValueOrDefault(AppConfig.WorkerKey(name, phone), "");
+    }
+
     void LoadWorkers()
     {
         _workers.Clear();
+        _masterWages = null;
         var dbPath = AppConfig.MonthlyDbPath(_year, _month, _project);
 
         // 근로자목록 로드 (FileScreen 이 저장한 목록)
@@ -360,7 +416,7 @@ public class WorkerScreen : UserControl
             }
         }
 
-        // 지급대장 로드 (기존 임금 데이터)
+        // 지급대장 로드 (기존 임금 데이터) — 동명이인 구분을 위해 이름+전화번호로 키를 잡는다
         Dictionary<string, string[]> payDict = [];
         if (File.Exists(dbPath))
         {
@@ -375,19 +431,22 @@ public class WorkerScreen : UserControl
                     int ci = Array.IndexOf(payCols, AppConfig.PayCols[i]);
                     d[i] = ci >= 0 && ci < row.Length ? row[ci] : "";
                 }
-                string name = d[I_NAME];
-                if (!string.IsNullOrEmpty(name)) payDict[name] = d;
+                if (!string.IsNullOrEmpty(d[I_NAME]))
+                    payDict[AppConfig.WorkerKey(d[I_NAME], d[I_PHONE])] = d;
             }
         }
 
         // 근로자목록의 순서로 _workers 구성
         int seq = 1;
-        int wlNameIdx = Array.IndexOf(wlCols, "이름");
+        int wlNameIdx  = Array.IndexOf(wlCols, "이름");
+        int wlPhoneIdx = Array.IndexOf(wlCols, "전화번호");
+        int wlWageIdx  = Array.IndexOf(wlCols, "시급");
         foreach (var wRow in workerList)
         {
-            string name = wlNameIdx >= 0 && wlNameIdx < wRow.Length ? wRow[wlNameIdx] : "";
+            string WV(int i) => i >= 0 && i < wRow.Length ? wRow[i] : "";
+            string name = WV(wlNameIdx);
             string[] data;
-            if (payDict.TryGetValue(name, out var existing))
+            if (payDict.TryGetValue(AppConfig.WorkerKey(name, WV(wlPhoneIdx)), out var existing))
             {
                 data = existing;
                 if (string.IsNullOrEmpty(data[I_AUTO])) data[I_AUTO] = "1";
@@ -399,12 +458,14 @@ public class WorkerScreen : UserControl
                 CopyFromWorkerList(data, wlCols, wRow);
                 data[I_START] = "1일";
                 data[I_AUTO]  = "1";   // 금액자동 기본 ON
-                // 지급대장의 시급 = 근로자 마스터의 시급
-                int wageIdx = Array.IndexOf(wlCols, "시급");
-                if (wageIdx >= 0 && wageIdx < wRow.Length)
-                    data[I_WAGE] = wRow[wageIdx];
                 data[I_BREAK] = "1";   // 휴게 자동공제 기본 ON
             }
+            // 시급이 비어 있으면 임금이 전부 0 으로 계산된다.
+            // 근로자목록 → 전체근로자(원본) 순으로 채워 넣는다.
+            if (string.IsNullOrWhiteSpace(data[I_WAGE])) data[I_WAGE] = WV(wlWageIdx);
+            if (string.IsNullOrWhiteSpace(data[I_WAGE]))
+                data[I_WAGE] = MasterWage(name, WV(wlPhoneIdx));
+            data[I_SELECT] = "";       // '전체 선택'은 기억하지 않고 매번 초기화
             data[I_SEQ] = seq++.ToString();
             _workers.Add(data);
         }
@@ -412,8 +473,81 @@ public class WorkerScreen : UserControl
         // 근로자목록이 없으면 지급대장에서 직접 로드
         if (_workers.Count == 0 && payDict.Count > 0)
         {
-            foreach (var kv in payDict) _workers.Add(kv.Value);
+            foreach (var kv in payDict) { kv.Value[I_SELECT] = ""; _workers.Add(kv.Value); }
         }
+    }
+
+    // ── 시간 목록 (주간 근무표와 공용 프리셋) ─────────────
+    // 프리셋 + 현재 입력된 시간으로 날짜 셀 콤보 / 관리 콤보의 목록을 만든다.
+    void RefreshTimeOptions()
+    {
+        _presets = TimePresets.Load();
+
+        var displays = new List<string> { "" };            // 빈칸(지우기용)
+        void Add(string? norm)
+        {
+            if (string.IsNullOrEmpty(norm)) return;
+            var disp = FmtRange(norm);
+            if (!displays.Contains(disp)) displays.Add(disp);
+        }
+        foreach (var t in _presets) Add(t);
+        foreach (var d in _workers)
+            for (int day = 1; day <= _lastDay; day++) Add(d[D_DATE_DB + day - 1]);
+
+        _timeOptions.Clear();
+        for (int c = D_DATE_COL; c < D_DATE_COL + N_DATES; c++)
+        {
+            var col = (DataGridViewComboBoxColumn)_grid.Columns[c];
+            col.Items.Clear();
+            foreach (var disp in displays) col.Items.Add(disp);
+        }
+        foreach (var disp in displays) _timeOptions.Add(disp);
+
+        string keep = _cmbTimes.Text;
+        _cmbTimes.Items.Clear();
+        foreach (var disp in displays.Skip(1)) _cmbTimes.Items.Add(disp);
+        _cmbTimes.Text = keep;
+    }
+
+    // 목록에 없는 시간(붙여넣기 등)이 셀에 들어가도 콤보가 거부하지 않도록 추가해 둔다.
+    void EnsureOption(string display)
+    {
+        if (string.IsNullOrEmpty(display) || !_timeOptions.Add(display)) return;
+        for (int c = D_DATE_COL; c < D_DATE_COL + N_DATES; c++)
+            ((DataGridViewComboBoxColumn)_grid.Columns[c]).Items.Add(display);
+        _cmbTimes.Items.Add(display);
+    }
+
+    // 콤보에 입력/선택된 시간을 목록에 추가 (저장은 주간 근무표와 공유)
+    void AddTime()
+    {
+        string norm = NormRange(_cmbTimes.Text);
+        if (string.IsNullOrEmpty(norm))
+        {
+            MessageBox.Show("시간을 '시작-끝' 형식으로 입력하세요. (예: 10-15, 9:30-14)", "시간추가", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (!_presets.Contains(norm))
+        {
+            _presets.Add(norm);
+            TimePresets.Save(_presets);
+        }
+        RefreshTimeOptions();
+        _cmbTimes.Text = FmtRange(norm);
+    }
+
+    void DeleteTime()
+    {
+        string norm = NormRange(_cmbTimes.Text);
+        if (string.IsNullOrEmpty(norm))
+        {
+            MessageBox.Show("삭제할 시간을 콤보에서 고르세요.", "시간삭제", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (!_presets.Remove(norm)) { MessageBox.Show("목록에 없는 시간입니다.", "시간삭제", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+        TimePresets.Save(_presets);
+        RefreshTimeOptions();
+        _cmbTimes.Text = "";
     }
 
     void CopyFromWorkerList(string[] data, string[] wlCols, string[] wRow)
@@ -458,7 +592,16 @@ public class WorkerScreen : UserControl
         _grid.Rows.Add(r1);
     }
 
+    bool _syncing;   // 그리드에 값을 넣는 중 — CellValueChanged 무시
+
     void FillRow(DataGridViewRow row, string[] d, int subRow, int wi)
+    {
+        _syncing = true;
+        try { FillRowCore(row, d, subRow); }
+        finally { _syncing = false; }
+    }
+
+    void FillRowCore(DataGridViewRow row, string[] d, int subRow)
     {
         // INFO cols
         row.Cells[0].Value = subRow == 0 && d[I_SELECT] == "1";   // ☑
@@ -481,7 +624,9 @@ public class WorkerScreen : UserControl
                 int dbIdx = D_DATE_DB + day - 1;
                 val = d[dbIdx];
             }
-            row.Cells[D_DATE_COL + s].Value = FmtRange(val);   // "18:00-22:00" → "18-22"
+            var disp = FmtRange(val);                          // "18:00-22:00" → "18-22"
+            EnsureOption(disp);
+            row.Cells[D_DATE_COL + s].Value = disp;
         }
 
         // SUM cols: pair i → DB[D_SUM_DB + i*2 + subRow]
@@ -722,6 +867,37 @@ public class WorkerScreen : UserControl
         if (e.ColumnIndex == 1 && subRow == 0) { d[I_AUTO] = d[I_AUTO] == "1" ? "" : "1"; if (d[I_AUTO] == "1") AutoCalc(wi); RefreshWorkerRows(wi); return; }
         if (e.ColumnIndex == 2 && subRow == 0) { d[I_BREAK] = d[I_BREAK] == "0" ? "1" : "0"; if (d[I_AUTO] == "1") AutoCalc(wi); RefreshWorkerRows(wi); return; }
 
+        // 날짜 칸 클릭 → 시간 목록 드롭다운 자동 열기
+        if (CellToDay(e.RowIndex, e.ColumnIndex) > 0)
+            BeginInvoke(() =>
+            {
+                try
+                {
+                    _grid.BeginEdit(true);
+                    if (_grid.EditingControl is ComboBox cb) cb.DroppedDown = true;
+                }
+                catch { }
+            });
+    }
+
+    // 날짜 칸에서 시간을 고르면(콤보 커밋) 다른 칸으로 옮기지 않아도 바로 다시 계산한다.
+    void OnCellValueChanged(object? s, DataGridViewCellEventArgs e)
+    {
+        if (_syncing || e.RowIndex < 0) return;
+        int day = CellToDay(e.RowIndex, e.ColumnIndex);
+        if (day <= 0) return;
+        int wi = e.RowIndex / 2;
+        if (wi >= _workers.Count) return;
+
+        var d = _workers[wi];
+        d[D_DATE_DB + day - 1] = NormRange(_grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString());
+        // 편집이 아직 진행 중이므로 그리드 갱신은 뒤로 미룬다
+        BeginInvoke(() =>
+        {
+            if (d[I_AUTO] == "1") AutoCalc(wi);
+            RefreshWorkerRows(wi);
+            UpdateWarnings();
+        });
     }
 
     void OnCellEndEdit(object? s, DataGridViewCellEventArgs e)
@@ -979,11 +1155,15 @@ public class WorkerScreen : UserControl
                 lines.Add($"⚠ {name} : 4대보험 가입대상 — {why}");
             }
 
-            // 3) 최저임금 미달
+            // 3) 시급 미입력 — 금액자동이 켜져 있어도 임금이 전부 0 으로 계산된다
+            if (wage <= 0 && a.TotalH > 0)
+                lines.Add($"⚠ {name} : 시급이 없어 임금이 0원으로 계산됩니다 — 우클릭 '정보수정'에서 시급을 입력하세요");
+
+            // 4) 최저임금 미달
             if (_minWage > 0 && wage > 0 && wage < _minWage)
                 lines.Add($"⚠ {name} : 시급 {wage:N0}원 < 최저임금 {_minWage:N0}원 — 미달");
 
-            // 4) 5인 미만이라 가산수당이 안 붙는 연장/야간/휴일 근로
+            // 5) 5인 미만이라 가산수당이 안 붙는 연장/야간/휴일 근로
             if (_staffCount < _extraMinStaff && (a.OtH > 0 || a.NightH > 0 || a.HolH > 0))
             {
                 var parts = new List<string>();

@@ -6,7 +6,7 @@ namespace manHours.Screens.Noim;
 public class WeeklyScreen : UserControl
 {
     // ── 그리드 컬럼 ───────────────────────────────────────
-    const int C_SEQ = 0, C_NAME = 1, C_STAT = 2, C_MON = 3;   // 월=3 ... 일=9
+    const int C_SEQ = 0, C_NAME = 1, C_PHONE = 2, C_STAT = 3, C_MON = 4;   // 월=4 ... 일=10
     static readonly string[] DayNames = ["월", "화", "수", "목", "금", "토", "일"];
 
     // ── PayCols 인덱스 (이름으로 조회 — 컬럼 순서 바뀌어도 안전) ──
@@ -40,9 +40,8 @@ public class WeeklyScreen : UserControl
     readonly List<(string Label, List<int> Days)> _weeks = [];
     bool _syncing;                  // 그리드 재구성 중 값변경 이벤트 무시
 
-    // 시간 프리셋(사용자 편집·저장)
-    static readonly string[] PresetCols = ["라벨", "시간"];
-    readonly List<(string Label, string Time)> _presets = [];
+    // 시간 프리셋(사용자 편집·저장) — '근무시간 입력' 화면과 공용
+    List<string> _presets = [];
     ContextMenuStrip _cellMenu = null!;
 
     public WeeklyScreen()
@@ -196,6 +195,7 @@ public class WeeklyScreen : UserControl
             => _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = h, Width = w, ReadOnly = ro, SortMode = DataGridViewColumnSortMode.NotSortable });
         Col("순번", 40, true);
         Col("이름", 90, true);
+        Col("전화번호", 110, true);   // 동명이인 구분
         Col("상태", 66, true);
         // 요일 칸: 시간 목록 콤보박스 (포커스되면 드롭다운으로 선택)
         foreach (var d in DayNames)
@@ -273,15 +273,17 @@ public class WeeklyScreen : UserControl
     {
         _rows.Clear();
 
-        // 주간근무(사업명별) 시간 로드
+        // 주간근무(사업명별) 시간 로드 — 동명이인 구분을 위해 이름+전화번호로 키를 잡는다.
+        // 전화번호가 없는 예전 데이터는 이름만으로도 찾을 수 있게 별도 보관.
         var times = new Dictionary<string, string[]>();
+        var legacyTimes = new Dictionary<string, string[]>();
         try
         {
             using var db = new Database(AppConfig.BaseDbPath);
             db.EnsureTable("주간근무", AppConfig.WeeklyCols);
             var (cols, rows) = db.SelectStrings("주간근무",
                 $"\"사업명\"='{_project.Replace("'", "''")}'");
-            int ni = Array.IndexOf(cols, "이름");
+            int ni = Array.IndexOf(cols, "이름"), pi = Array.IndexOf(cols, "전화번호");
             foreach (var r in rows)
             {
                 if (ni < 0 || ni >= r.Length) continue;
@@ -291,12 +293,15 @@ public class WeeklyScreen : UserControl
                     int ci = Array.IndexOf(cols, DayNames[d]);
                     arr[d] = ci >= 0 && ci < r.Length ? r[ci] : "";
                 }
-                times[r[ni]] = arr;
+                string phone = pi >= 0 && pi < r.Length ? r[pi] : "";
+                times[AppConfig.WorkerKey(r[ni], phone)] = arr;
+                if (string.IsNullOrWhiteSpace(phone)) legacyTimes[r[ni]] = arr;
             }
         }
         catch { }
 
         // 전체근로자에서 로스터 구성
+        var claimed = new List<(string Name, string Phone)>();   // 예전 행을 물려받은 근로자
         try
         {
             using var db = new Database(AppConfig.BaseDbPath);
@@ -309,17 +314,44 @@ public class WeeklyScreen : UserControl
                 if (!_chkInactive.Checked && status != "현재근무") continue;
                 string name = V(r, "이름");
                 if (string.IsNullOrWhiteSpace(name)) continue;
+                string phone = V(r, "전화번호");
+                // 이름+전화번호로 먼저 찾고, 없으면 전화번호 없던 예전 데이터를 이름으로 찾는다.
+                if (!times.TryGetValue(AppConfig.WorkerKey(name, phone), out var t)
+                    && legacyTimes.Remove(name, out t))       // 한 번만 물려받아 동명이인이 공유하지 않게
+                    claimed.Add((name, phone));
                 _rows.Add(new Row
                 {
-                    Name = name, Jumin = V(r, "생년월일6자리"), Phone = V(r, "전화번호"),
+                    Name = name, Jumin = V(r, "생년월일6자리"), Phone = phone,
                     Addr = V(r, "거주지역"), Wage = V(r, "시급"), Status = status,
-                    Times = times.TryGetValue(name, out var t) ? t : new string[7],
+                    Times = t ?? new string[7],
                 });
             }
         }
         catch { }
 
+        MigrateWeeklyPhones(claimed);
+
         _lblStatus.Text = $"  {_project}  |  근로자 {_rows.Count}명  |  요일 칸을 눌러 시간을 선택하세요 · 지우기: 셀 선택 후 Del 또는 우클릭";
+    }
+
+    // 전화번호 없이 저장된 예전 주간근무 행에 전화번호를 채워 넣는다(동명이인 분리용).
+    // 화면에 보이는 그대로를 기록할 뿐 시간 데이터는 건드리지 않으므로, 저장 버튼과 달리 안전하다.
+    void MigrateWeeklyPhones(List<(string Name, string Phone)> claimed)
+    {
+        if (claimed.Count == 0) return;
+        try
+        {
+            using var db = new Database(AppConfig.BaseDbPath);
+            foreach (var (name, phone) in claimed)
+            {
+                if (string.IsNullOrWhiteSpace(phone)) continue;
+                db.Execute(
+                    "UPDATE \"주간근무\" SET \"전화번호\"=@p0 " +
+                    "WHERE \"사업명\"=@p1 AND \"이름\"=@p2 AND (\"전화번호\" IS NULL OR \"전화번호\"='')",
+                    phone, _project, name);
+            }
+        }
+        catch { }
     }
 
     void Reload() { LoadRows(); RefreshTimeOptions(); RefreshGrid(); }
@@ -334,7 +366,7 @@ public class WeeklyScreen : UserControl
             var d = WorkerScreen.FmtRange(norm);
             if (!displays.Contains(d)) displays.Add(d);
         }
-        foreach (var (_, t) in _presets) Add(t);
+        foreach (var t in _presets) Add(t);
         foreach (var r in _rows) foreach (var t in r.Times) Add(t);
 
         for (int c = C_MON; c < C_MON + 7; c++)
@@ -357,9 +389,10 @@ public class WeeklyScreen : UserControl
         for (int i = 0; i < _rows.Count; i++)
         {
             var r = _rows[i];
-            var cells = new object[3 + 7];
+            var cells = new object[4 + 7];
             cells[C_SEQ] = i + 1;
             cells[C_NAME] = r.Name;
+            cells[C_PHONE] = r.Phone;
             cells[C_STAT] = r.Status;
             for (int d = 0; d < 7; d++) cells[C_MON + d] = WorkerScreen.FmtRange(r.Times[d]);
             int ri = _grid.Rows.Add(cells);
@@ -383,43 +416,7 @@ public class WeeklyScreen : UserControl
     }
 
     // ── 시간 프리셋 관리 ───────────────────────────────────
-    void LoadPresets()
-    {
-        _presets.Clear();
-        try
-        {
-            using var db = new Database(AppConfig.BaseDbPath);
-            db.EnsureTable("시간프리셋", PresetCols);
-            var (cols, rows) = db.SelectStrings("시간프리셋");
-            int li = Array.IndexOf(cols, "라벨"), ti = Array.IndexOf(cols, "시간");
-            foreach (var r in rows)
-            {
-                string tm  = ti >= 0 && ti < r.Length ? r[ti] : "";
-                string lab = li >= 0 && li < r.Length ? r[li] : "";
-                if (!string.IsNullOrEmpty(tm)) _presets.Add((lab, tm));
-            }
-        }
-        catch { }
-        if (_presets.Count == 0)   // 최초 실행: 기본 프리셋 씨앗
-        {
-            foreach (var (l, t) in AppConfig.WorkTimePresets)
-                _presets.Add((l, WorkerScreen.NormRange(t)));
-            SavePresets();
-        }
-    }
-
-    void SavePresets()
-    {
-        try
-        {
-            using var db = new Database(AppConfig.BaseDbPath);
-            db.EnsureTable("시간프리셋", PresetCols);
-            db.Execute("DELETE FROM \"시간프리셋\"");
-            foreach (var (l, t) in _presets)
-                db.InsertRow("시간프리셋", PresetCols, [l, t]);
-        }
-        catch { }
-    }
+    void LoadPresets() => _presets = TimePresets.Load();
 
     // 콤보에 입력/선택된 시간을 목록에 추가 (셀 콤보에도 반영·저장)
     void AddTime()
@@ -430,10 +427,10 @@ public class WeeklyScreen : UserControl
             MessageBox.Show("시간을 '시작-끝' 형식으로 입력하세요. (예: 10-15, 9:30-14)", "시간추가", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        if (!_presets.Any(p => p.Time == norm))
+        if (!_presets.Contains(norm))
         {
-            _presets.Add((WorkerScreen.FmtRange(norm), norm));
-            SavePresets();
+            _presets.Add(norm);
+            TimePresets.Save(_presets);
         }
         RefreshTimeOptions();
         _cmbTimes.Text = WorkerScreen.FmtRange(norm);
@@ -448,30 +445,44 @@ public class WeeklyScreen : UserControl
             MessageBox.Show("삭제할 시간을 콤보에서 고르세요.", "시간삭제", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        int n = _presets.RemoveAll(p => p.Time == norm);
-        if (n == 0) { MessageBox.Show("목록에 없는 시간입니다.", "시간삭제", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
-        SavePresets();
+        if (!_presets.Remove(norm)) { MessageBox.Show("목록에 없는 시간입니다.", "시간삭제", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+        TimePresets.Save(_presets);
         RefreshTimeOptions();
         _cmbTimes.Text = "";
     }
 
     void Save()
     {
+        if (SaveRows(silent: false))
+            MessageBox.Show("주간 근무표를 저장했습니다.", "저장", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    /// <summary>화면의 주간 패턴을 저장한다. 목록에 없는 근로자(휴직/퇴사 등)의 행은 건드리지 않는다.</summary>
+    bool SaveRows(bool silent)
+    {
         _grid.EndEdit();
         try
         {
             using var db = new Database(AppConfig.BaseDbPath);
             db.EnsureTable("주간근무", AppConfig.WeeklyCols);
-            db.Execute("DELETE FROM \"주간근무\" WHERE \"사업명\"=@p0", _project);
+            // 전체 삭제하면 화면에서 걸러진 휴직/퇴사자의 패턴까지 지워진다. 보이는 사람만 교체.
+            foreach (var r in _rows)
+                db.Execute(
+                    "DELETE FROM \"주간근무\" WHERE \"사업명\"=@p0 AND \"이름\"=@p1 AND \"전화번호\"=@p2",
+                    _project, r.Name, r.Phone);
             foreach (var r in _rows)
             {
                 if (r.Times.All(string.IsNullOrEmpty)) continue;   // 전부 비면 저장 안 함
                 db.InsertRow("주간근무", AppConfig.WeeklyCols,
-                    [_project, r.Name, .. r.Times]);
+                    [_project, r.Name, r.Phone, .. r.Times]);
             }
-            MessageBox.Show("주간 근무표를 저장했습니다.", "저장", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return true;
         }
-        catch (Exception ex) { MessageBox.Show($"오류: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        catch (Exception ex)
+        {
+            if (!silent) MessageBox.Show($"오류: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
     }
 
     // 월 전체 적용
@@ -499,8 +510,10 @@ public class WeeklyScreen : UserControl
     void ApplyPattern(List<int> targetDays, string desc)
     {
         _grid.EndEdit();
-        var active = _rows.Where(r => r.Status == "현재근무" && r.Times.Any(t => !string.IsNullOrEmpty(t))).ToList();
-        if (active.Count == 0)
+        // 현재근무 전원이 대상. 요일 시간이 없는 사람은 '빈 패턴'을 적용해 그 날짜를 비운다.
+        var current  = _rows.Where(r => r.Status == "현재근무").ToList();
+        var scheduled = current.Where(r => r.Times.Any(t => !string.IsNullOrEmpty(t))).ToList();
+        if (scheduled.Count == 0)
         {
             MessageBox.Show("적용할 근무(현재근무 + 요일 시간)가 없습니다.", "적용", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
@@ -510,6 +523,8 @@ public class WeeklyScreen : UserControl
                 "적용", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
             return;
 
+        if (!SaveRows(silent: false)) return;   // 적용 전에 주간표를 자동 저장
+
         int lastDay = DateTime.DaysInMonth(_year, _month);
         var dbPath = AppConfig.MonthlyDbPath(_year, _month, _project);
         try
@@ -518,14 +533,15 @@ public class WeeklyScreen : UserControl
             db.EnsureTable("근로자목록", AppConfig.WorkerCols);
             db.EnsureTable("지급대장", AppConfig.PayCols);
 
-            // 근로자목록 이름 집합 (없으면 마스터에서 채워 넣는다)
+            // 근로자목록 키 집합 (없으면 마스터에서 채워 넣는다) — 이름+전화번호
             var (wlCols, wlRows) = db.SelectStrings("근로자목록");
-            int wlNi = Array.IndexOf(wlCols, "이름");
-            var wlNames = wlRows.Select(r => wlNi >= 0 && wlNi < r.Length ? r[wlNi] : "").ToHashSet();
+            int wlNi = Array.IndexOf(wlCols, "이름"), wlPi = Array.IndexOf(wlCols, "전화번호");
+            string WlV(string[] r, int i) => i >= 0 && i < r.Length ? r[i] : "";
+            var wlKeys = wlRows.Select(r => AppConfig.WorkerKey(WlV(r, wlNi), WlV(r, wlPi))).ToHashSet();
 
-            // 기존 지급대장 → 이름별
+            // 기존 지급대장 → 이름+전화번호별
             var (payCols, payRows) = db.SelectStrings("지급대장");
-            int pNi = Array.IndexOf(payCols, "이름");
+            int pNi = Array.IndexOf(payCols, "이름"), pPi = Array.IndexOf(payCols, "전화번호");
             var payDict = new Dictionary<string, string[]>();
             foreach (var r in payRows)
             {
@@ -535,40 +551,50 @@ public class WeeklyScreen : UserControl
                     int ci = Array.IndexOf(payCols, AppConfig.PayCols[i]);
                     d[i] = ci >= 0 && ci < r.Length ? r[ci] : "";
                 }
-                if (pNi >= 0 && pNi < r.Length) payDict[r[pNi]] = d;
+                if (pNi >= 0 && pNi < r.Length)
+                    payDict[AppConfig.WorkerKey(r[pNi], WlV(r, pPi))] = d;
             }
 
             int seq = payDict.Count;
-            foreach (var r in active)
+            foreach (var r in current)
             {
-                // 근로자목록에 없으면 추가
-                if (!wlNames.Contains(r.Name))
+                string key = AppConfig.WorkerKey(r.Name, r.Phone);
+                bool hasPattern = r.Times.Any(t => !string.IsNullOrEmpty(t));
+
+                // 주간표에 시간이 없는 사람은 이미 지급대장에 있을 때만 손댄다.
+                // (요일 시간이 비었다고 새 인원을 지급대장에 끌어들이지 않는다)
+                if (!hasPattern && !payDict.ContainsKey(key)) continue;
+
+                // 근로자목록에 없으면 추가 — 시간이 있는 사람만
+                if (hasPattern && !wlKeys.Contains(key))
                 {
                     var w = new string[AppConfig.WorkerCols.Length];
                     void W(string c, string v) { int i = Array.IndexOf(AppConfig.WorkerCols, c); if (i >= 0) w[i] = v; }
                     W("이름", r.Name); W("생년월일6자리", r.Jumin); W("거주지역", r.Addr);
                     W("전화번호", r.Phone); W("시급", r.Wage); W("상태", "현재근무");
                     db.InsertRow("근로자목록", AppConfig.WorkerCols, w);
-                    wlNames.Add(r.Name);
+                    wlKeys.Add(key);
                 }
 
                 // 지급대장 행 가져오거나 새로
-                if (!payDict.TryGetValue(r.Name, out var d))
+                if (!payDict.TryGetValue(key, out var d))
                 {
                     d = new string[AppConfig.PayCols.Length];
                     for (int i = 0; i < d.Length; i++) d[i] = "";
                     if (P_SEQ >= 0) d[P_SEQ] = (++seq).ToString();
-                    payDict[r.Name] = d;
+                    payDict[key] = d;
                 }
                 if (P_NAME  >= 0) d[P_NAME]  = r.Name;
                 if (P_JUMIN >= 0) d[P_JUMIN] = r.Jumin;
                 if (P_PHONE >= 0) d[P_PHONE] = r.Phone;
                 if (P_ADDR  >= 0) d[P_ADDR]  = r.Addr;
-                if (P_WAGE  >= 0) d[P_WAGE]  = r.Wage;
+                // 마스터에 시급이 없으면 지급대장에 입력된 시급을 덮어쓰지 않는다
+                if (P_WAGE  >= 0 && !string.IsNullOrWhiteSpace(r.Wage)) d[P_WAGE] = r.Wage;
                 if (P_AUTO  >= 0) d[P_AUTO]  = "1";
                 if (P_BREAK >= 0) d[P_BREAK] = "1";
 
-                // 대상 날짜만 요일 시간으로 채우기 (그 외 날짜는 건드리지 않음)
+                // 대상 날짜만 요일 시간으로 채우기 (그 외 날짜는 건드리지 않음).
+                // 요일 시간이 비어 있으면 그 날짜도 빈 값이 되어 근무가 지워진다.
                 foreach (int day in targetDays)
                 {
                     int wd = ((int)new DateTime(_year, _month, day).DayOfWeek + 6) % 7;  // 월=0
@@ -589,13 +615,31 @@ public class WeeklyScreen : UserControl
                 }
             }
 
+            // 적용 결과 그 달에 근무시간이 하나도 남지 않은 사람은 이번 달 인원에서 뺀다.
+            // (다른 주에 직접 입력한 근무가 남아 있으면 그대로 유지된다)
+            foreach (var r in current)
+            {
+                string key = AppConfig.WorkerKey(r.Name, r.Phone);
+                if (!payDict.TryGetValue(key, out var d)) continue;
+                bool anyHours = false;
+                for (int day = 1; day <= lastDay && !anyHours; day++)
+                {
+                    int ci = P_DAY(day);
+                    if (ci >= 0 && !string.IsNullOrEmpty(d[ci])) anyHours = true;
+                }
+                if (anyHours) continue;
+                payDict.Remove(key);
+                db.Execute("DELETE FROM \"근로자목록\" WHERE \"이름\"=@p0 AND \"전화번호\"=@p1",
+                    r.Name, r.Phone);
+            }
+
             // 지급대장 재작성
             db.Execute("DELETE FROM \"지급대장\"");
             foreach (var d in payDict.Values)
                 db.InsertRow("지급대장", AppConfig.PayCols, d);
 
             MessageBox.Show(
-                $"{desc} 근무시간에 적용했습니다. ({active.Count}명)\n'근무시간 입력' 화면에서 확인하세요.",
+                $"{desc} 근무시간에 적용했습니다. ({scheduled.Count}명)\n'근무시간 입력' 화면에서 확인하세요.",
                 "완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) { MessageBox.Show($"오류: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); }

@@ -32,8 +32,9 @@ internal static class Program
             SavedLoginId     = cfg.SavedLoginId,
             SavedLoginPw     = cfg.SavedLoginPw,
             ApiKey           = cfg.ApiKey,
-            GuestMessage     = "비회원은 6개월간 무료 이용 혜택이 있습니다.\n계속 하시려면 확인을 눌러주세요.",
-            GuestTrialMonths = 6,
+            GuestMessage     = "비회원은 1개월간 무료로 이용하실 수 있습니다.\n회원가입 시에는 6개월간 무료 이용 혜택이 있습니다.\n계속 하시려면 확인을 눌러주세요.",
+            GuestTrialMonths  = 1,
+            MemberTrialMonths = 6,
             GuestTrialStart  = DateTime.TryParse(cfg.GuestTrialStart, out var gs) ? gs : null,
         };
 

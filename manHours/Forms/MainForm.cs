@@ -423,9 +423,10 @@ public class MainForm : Form
 
     void ShowScreen(string name)
     {
-        // 근무시간 입력/장비변경에서 다른 화면으로 이동할 때 자동 저장
+        // 근무시간 입력/장비변경/인원선택에서 다른 화면으로 이동할 때 자동 저장
         if (_current is WorkerScreen ws)           ws.SaveData();
         if (_current is EquipmentWorkerScreen ews) ews.SaveData();
+        if (_current is FileScreen fs)             fs.SaveRoster();
 
         int year  = 2020 + _cbYear.SelectedIndex;
         int month = _cbMonth.SelectedIndex + 1;

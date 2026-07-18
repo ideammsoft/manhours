@@ -143,9 +143,13 @@ static class AppConfig
     // 근로자 상태
     public static readonly string[] WorkStatuses = ["현재근무", "휴직", "퇴사"];
 
+    /// <summary>동명이인 구분 키. 이름 + 전화번호(숫자만).</summary>
+    public static string WorkerKey(string? name, string? phone) =>
+        $"{(name ?? "").Trim()}|{new string((phone ?? "").Where(char.IsDigit).ToArray())}";
+
     // ── 주간 근무표 ──────────────────────────────────────
     public static readonly string[] WeeklyCols =
-        ["사업명", "이름", "월", "화", "수", "목", "금", "토", "일"];
+        ["사업명", "이름", "전화번호", "월", "화", "수", "목", "금", "토", "일"];
 
     // 요일칸에 빠르게 넣는 시간 프리셋 (라벨, 저장형 시간)
     public static readonly (string Label, string Time)[] WorkTimePresets =

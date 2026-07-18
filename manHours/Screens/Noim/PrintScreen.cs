@@ -789,8 +789,14 @@ public class PrintScreen : UserControl
                 text = text.Replace("{{" + kv.Key + "}}", kv.Value);
 
             // 숫자만 남으면 숫자로 넣어야 엑셀에서 합계·서식이 먹는다
-            if (long.TryParse(text.Replace(",", ""), out var n)) cell.Value = n;
-            else                                                 cell.Value = text;
+            if (long.TryParse(text.Replace(",", ""), out var n))
+            {
+                cell.Value = n;
+                // 값에 콤마가 있었다면 금액(Won) 이므로 천단위 서식을 유지한다.
+                // 년도(2026)·사번 같은 값은 콤마가 없어 그대로 둔다.
+                if (text.Contains(',')) cell.Style.NumberFormat.Format = "#,##0";
+            }
+            else cell.Value = text;
         }
     }
 

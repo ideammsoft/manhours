@@ -13,6 +13,11 @@ public class FileScreen : UserControl
 
     // 표시 컬럼: 자격증 제외 (10 = 총 일급여)
     static readonly int[] VisibleColIdx = [0, 1, 2, 3, 4, 5, 6, 7, 10]; // WorkerCols 인덱스
+    static readonly int W_NAME  = Array.IndexOf(AppConfig.WorkerCols, "이름");
+    static readonly int W_PHONE = Array.IndexOf(AppConfig.WorkerCols, "전화번호");
+    // _grdSel/_grdAll 의 셀 인덱스 (0번은 체크박스라 +1)
+    static readonly int G_NAME  = Array.IndexOf(VisibleColIdx, W_NAME)  + 1;
+    static readonly int G_PHONE = Array.IndexOf(VisibleColIdx, W_PHONE) + 1;
     static readonly string[] VisibleColNames =
         VisibleColIdx.Select(i => AppConfig.WorkerCols[i]).ToArray();
 
@@ -348,13 +353,12 @@ public class FileScreen : UserControl
 
     void AddToSel(string[] cols, string[] row, bool isNew)
     {
-        // 중복 체크 (이름)
-        int nameIdx = Array.IndexOf(cols, "이름");
-        string name = nameIdx >= 0 && nameIdx < row.Length ? row[nameIdx] : "";
-        for (int r = 0; r < _grdSel.Rows.Count; r++)
-        {
-            if (_grdSel.Rows[r].Cells[1].Value?.ToString() == name) return;
-        }
+        // 중복 체크 (이름+전화번호) — 동명이인은 서로 다른 사람으로 본다
+        int nameIdx  = Array.IndexOf(cols, "이름");
+        int phoneIdx = Array.IndexOf(cols, "전화번호");
+        string name  = nameIdx  >= 0 && nameIdx  < row.Length ? row[nameIdx]  : "";
+        string phone = phoneIdx >= 0 && phoneIdx < row.Length ? row[phoneIdx] : "";
+        if (IsAlreadySelected(name, phone)) return;
 
         var cells = new object[VisibleColIdx.Length + 1];
         cells[0] = false;
@@ -366,6 +370,18 @@ public class FileScreen : UserControl
         int rIdx = _grdSel.Rows.Add(cells);
         if (isNew)
             _grdSel.Rows[rIdx].DefaultCellStyle.BackColor = ThemeManager.IsDark ? Color.FromArgb(20, 60, 30) : Color.FromArgb(195, 230, 200);
+    }
+
+    bool IsAlreadySelected(string name, string phone)
+    {
+        string key = AppConfig.WorkerKey(name, phone);
+        for (int r = 0; r < _grdSel.Rows.Count; r++)
+        {
+            var row = _grdSel.Rows[r];
+            if (AppConfig.WorkerKey(row.Cells[G_NAME].Value?.ToString(),
+                                    row.Cells[G_PHONE].Value?.ToString()) == key) return true;
+        }
+        return false;
     }
 
     void AskPreviousMonth()
@@ -408,9 +424,7 @@ public class FileScreen : UserControl
         for (int i = 0; i < VisibleColIdx.Length; i++)
             cells[i + 1] = _grdAll.Rows[rowIdx].Cells[i + 1].Value ?? "";
 
-        string name = cells[1]?.ToString() ?? "";
-        for (int r = 0; r < _grdSel.Rows.Count; r++)
-            if (_grdSel.Rows[r].Cells[1].Value?.ToString() == name) return;
+        if (IsAlreadySelected(cells[G_NAME]?.ToString() ?? "", cells[G_PHONE]?.ToString() ?? "")) return;
 
         int nr = _grdSel.Rows.Add(cells);
         _grdSel.Rows[nr].DefaultCellStyle.BackColor = ThemeManager.IsDark ? Color.FromArgb(20, 60, 30) : Color.FromArgb(195, 230, 200);
@@ -540,7 +554,7 @@ public class FileScreen : UserControl
         var dlg = new WorkerDialog(vals);
         if (dlg.ShowDialog() == DialogResult.OK)
         {
-            SaveWorkerUpdate(dlg.Values, vals[0]);
+            SaveWorkerUpdate(dlg.Values, vals[W_NAME], vals[W_PHONE]);
             LoadData();
         }
     }
@@ -551,7 +565,7 @@ public class FileScreen : UserControl
         var dlg = new WorkerDialog(vals);
         if (dlg.ShowDialog() == DialogResult.OK)
         {
-            SaveWorkerUpdate(dlg.Values, vals[0]);
+            SaveWorkerUpdate(dlg.Values, vals[W_NAME], vals[W_PHONE]);
             var newVals = dlg.Values;
             for (int i = 0; i < VisibleColIdx.Length; i++)
             {
@@ -563,12 +577,40 @@ public class FileScreen : UserControl
         }
     }
 
+    // 그리드는 일부 컬럼만 보여준다. 화면에 없는 컬럼(시급·자격증·비고·상태)은
+    // 전체근로자 원본에서 가져와야 편집·저장 때 지워지지 않는다.
     string[] GetWorkerValues(DataGridView g, int rowIdx)
     {
         var vals = new string[AppConfig.WorkerCols.Length];
         for (int i = 0; i < VisibleColIdx.Length; i++)
             vals[VisibleColIdx[i]] = g.Rows[rowIdx].Cells[i + 1].Value?.ToString() ?? "";
+        MergeHiddenCols(vals);
         return vals;
+    }
+
+    // 전체근로자에서 같은 이름+전화번호 레코드를 찾아 화면에 없는 컬럼만 채운다.
+    void MergeHiddenCols(string[] vals)
+    {
+        int ni = Array.IndexOf(AppConfig.WorkerCols, "이름");
+        int pi = Array.IndexOf(AppConfig.WorkerCols, "전화번호");
+        string key = AppConfig.WorkerKey(vals[ni], vals[pi]);
+        try
+        {
+            using var db = new Database(AppConfig.BaseDbPath);
+            db.EnsureTable("전체근로자", AppConfig.WorkerCols);
+            var (cols, rows) = db.SelectStrings("전체근로자");
+            int dni = Array.IndexOf(cols, "이름"), dpi = Array.IndexOf(cols, "전화번호");
+            string V(string[] r, int i) => i >= 0 && i < r.Length ? r[i] : "";
+            var src = rows.FirstOrDefault(r => AppConfig.WorkerKey(V(r, dni), V(r, dpi)) == key);
+            if (src == null) return;
+            for (int i = 0; i < AppConfig.WorkerCols.Length; i++)
+            {
+                if (VisibleColIdx.Contains(i)) continue;      // 화면 값이 우선
+                int ci = Array.IndexOf(cols, AppConfig.WorkerCols[i]);
+                vals[i] = ci >= 0 && ci < src.Length ? src[ci] : "";
+            }
+        }
+        catch { }
     }
 
     // ── DB 저장 ───────────────────────────────────────────
@@ -579,13 +621,24 @@ public class FileScreen : UserControl
         db.InsertRow("전체근로자", AppConfig.WorkerCols, vals);
     }
 
-    void SaveWorkerUpdate(string[] newVals, string oldName)
+    // 동명이인이 있으므로 이름만으로 UPDATE 하면 남의 정보를 덮어쓴다. 전화번호까지 함께 본다.
+    void SaveWorkerUpdate(string[] newVals, string oldName, string oldPhone)
     {
         using var db = new Database(AppConfig.BaseDbPath);
         db.EnsureTable("전체근로자", AppConfig.WorkerCols);
         var sets = string.Join(", ", AppConfig.WorkerCols.Select((c, i) => $"\"{c}\"=@p{i}"));
-        db.Execute($"UPDATE \"전체근로자\" SET {sets} WHERE \"이름\"=@p{AppConfig.WorkerCols.Length}",
-            newVals.Cast<object?>().Append(oldName).ToArray());
+        int n = AppConfig.WorkerCols.Length;
+        db.Execute($"UPDATE \"전체근로자\" SET {sets} WHERE \"이름\"=@p{n} AND \"전화번호\"=@p{n + 1}",
+            newVals.Cast<object?>().Append(oldName).Append(oldPhone).ToArray());
+    }
+
+    /// <summary>다른 화면으로 이동할 때 인원 선택 결과(제외 포함)를 저장한다.</summary>
+    public void SaveRoster()
+    {
+        if (string.IsNullOrEmpty(_project)) return;
+        // 목록이 비어 있으면 저장하지 않는다 — 화면을 열기만 해도 그 달 인원이 통째로 지워질 수 있다.
+        if (_grdSel.Rows.Count == 0) return;
+        try { SaveToDb(); } catch { }
     }
 
     void SaveToDb()
@@ -594,12 +647,29 @@ public class FileScreen : UserControl
         using var db = new Database(dbPath);
         db.EnsureTable("근로자목록", AppConfig.WorkerCols);
         db.Execute("DELETE FROM \"근로자목록\"");
+        var keep = new HashSet<string>();
         for (int r = 0; r < _grdSel.Rows.Count; r++)
         {
-            var vals = new string[AppConfig.WorkerCols.Length];
-            for (int i = 0; i < VisibleColIdx.Length; i++)
-                vals[VisibleColIdx[i]] = _grdSel.Rows[r].Cells[i + 1].Value?.ToString() ?? "";
+            var vals = GetWorkerValues(_grdSel, r);
             db.InsertRow("근로자목록", AppConfig.WorkerCols, vals);
+            keep.Add(AppConfig.WorkerKey(vals[W_NAME], vals[W_PHONE]));
+        }
+        PurgePayroll(db, keep);
+    }
+
+    // 인원선택에서 제외한 근로자는 그 달 지급대장에서도 빼준다.
+    static void PurgePayroll(Database db, HashSet<string> keep)
+    {
+        if (!db.TableExists("지급대장")) return;
+        var (cols, rows) = db.SelectStrings("지급대장");
+        int ni = Array.IndexOf(cols, "이름"), pi = Array.IndexOf(cols, "전화번호");
+        if (ni < 0) return;
+        string V(string[] r, int i) => i >= 0 && i < r.Length ? r[i] : "";
+        foreach (var row in rows)
+        {
+            string name = V(row, ni), phone = V(row, pi);
+            if (keep.Contains(AppConfig.WorkerKey(name, phone))) continue;
+            db.Execute("DELETE FROM \"지급대장\" WHERE \"이름\"=@p0 AND \"전화번호\"=@p1", name, phone);
         }
     }
 
