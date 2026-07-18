@@ -624,6 +624,12 @@ public class PrintScreen : UserControl
 
         var tpl    = AppConfig.SamplePath(tplName);
         bool hasTpl = File.Exists(tpl);
+        if (!hasTpl)
+        {
+            MessageBox.Show($"템플릿 파일을 찾을 수 없습니다.\n{tpl}\n\n프로그램을 재설치하면 해결됩니다.",
+                "출력 오류", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
 
         var ts      = DateTime.Now.ToString("HHmmss");
         var tmpXlsx = Path.Combine(Path.GetTempPath(), $"__{filePrefix}_{ts}.xlsx");

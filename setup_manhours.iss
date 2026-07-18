@@ -37,6 +37,7 @@ Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기"; Grou
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "manHours\Resources\app.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\templates\*"; DestDir: "{app}\templates"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app.ico"
