@@ -54,6 +54,24 @@ echo =============================================
 echo  Done!  dist\manHours.exe  built + signed (v%VER%)
 echo =============================================
 
+echo.
+echo [git] Commit + push source to GitHub...
+pushd "%~dp0"
+git add -A
+git diff --cached --quiet
+if errorlevel 1 (
+    git commit -m "build v%VER% (auto)" >nul 2>&1
+    git push origin main
+    if errorlevel 1 (
+        echo [git][WARN] push failed - check network/login.
+    ) else (
+        echo [git][OK] committed + pushed  v%VER%
+    )
+) else (
+    echo [git] no source changes - skip commit.
+)
+popd
+
 :ask_ftp
 set FTP_CHOICE=
 set /p FTP_CHOICE=Upload to FTP? [Y/N]:
