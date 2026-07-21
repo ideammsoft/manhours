@@ -432,6 +432,16 @@ public class MainForm : Form
         int month = _cbMonth.SelectedIndex + 1;
         var proj  = _cbProject.Text;
 
+        // 무료 이용기간이 끝나면 입력 화면(근무시간 입력·주간 근무표)만 잠근다.
+        if (AppConfig.TrialExpired && name is "지급대장" or "주간")
+        {
+            MessageBox.Show(
+                "무료 이용 기간이 만료되어 근무시간 입력과 주간 근무표는 사용할 수 없습니다.\n" +
+                "연장 후 이용해 주세요. (그 외 기능은 그대로 사용하실 수 있습니다)",
+                "무료 이용 기간 만료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         switch (name)
         {
             case "파일":

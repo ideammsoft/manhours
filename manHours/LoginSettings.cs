@@ -12,9 +12,11 @@ sealed class LoginSettings
     public string SavedLoginId   { get; set; } = "";
     public string SavedLoginPw   { get; set; } = ""; // base64
     public string LoginAccountId { get; set; } = ""; // 세션/중복감지용
+    public string LoginProvider  { get; set; } = ""; // 소셜 제공자(google/kakao/naver)
     public string SessionUser    { get; set; } = "";
     public string SessionToken   { get; set; } = "";
     public string GuestTrialStart { get; set; } = ""; // 비회원 최초 사용일(yyyy-MM-dd)
+    public string MemberTrialStart{ get; set; } = ""; // 회원(소셜) 무료 이용 시작일(yyyy-MM-dd)
 
     static readonly string CfgPath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),

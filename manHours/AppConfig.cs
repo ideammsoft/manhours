@@ -29,6 +29,9 @@ static class AppConfig
     public static string BaseDbPath => Path.Combine(DataDir, "noim_base.db");
     public static string ImageDir   => Path.Combine(BaseDir, "image");
 
+    /// <summary>무료 이용기간 만료 여부(로그인 시 결정). true 면 근무시간 입력·주간 근무표를 잠근다.</summary>
+    public static bool TrialExpired;
+
     // 샘플 템플릿 파일 경로 (exe 옆 templates\ 우선, 없으면 개발 경로 폴백)
     static string TemplateDir =>
         Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "templates");

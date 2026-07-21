@@ -36,23 +36,35 @@ internal static class Program
             GuestTrialMonths  = 1,
             MemberTrialMonths = 6,
             GuestTrialStart  = DateTime.TryParse(cfg.GuestTrialStart, out var gs) ? gs : null,
+            MemberTrialStart = DateTime.TryParse(cfg.MemberTrialStart, out var ms) ? ms : null,
+            // 지난 로그인 세션(소셜 포함) — [로그인]만 눌러 다시 입장할 수 있게
+            SavedAccountId    = cfg.LoginAccountId,
+            SavedProvider     = cfg.LoginProvider,
+            SavedSessionUser  = cfg.SessionUser,
+            SavedSessionToken = cfg.SessionToken,
         };
 
+        LoginResult r;
         using (var login = new LoginForm(opt))
         {
             if (login.ShowDialog() != DialogResult.OK) return;
-            var r = login.Result;
-            cfg.ApiBase        = opt.ApiBase;
-            cfg.ApiKey         = string.IsNullOrEmpty(r.ApiKey) ? opt.ApiKey : r.ApiKey;
-            cfg.RememberLogin  = r.RememberLogin;
-            cfg.SavedLoginId   = r.SavedLoginId;
-            cfg.SavedLoginPw   = r.SavedLoginPw;
-            cfg.LoginAccountId = r.AccountId;
-            cfg.SessionUser    = r.SessionUser;
-            cfg.SessionToken   = r.SessionToken;
-            if (r.GuestTrialStart != null) cfg.GuestTrialStart = r.GuestTrialStart.Value.ToString("yyyy-MM-dd");
-            cfg.Save();
+            r = login.Result;
         }
+        cfg.ApiBase        = opt.ApiBase;
+        cfg.ApiKey         = string.IsNullOrEmpty(r.ApiKey) ? opt.ApiKey : r.ApiKey;
+        cfg.RememberLogin  = r.RememberLogin;
+        cfg.SavedLoginId   = r.SavedLoginId;
+        cfg.SavedLoginPw   = r.SavedLoginPw;
+        cfg.LoginAccountId = r.AccountId;
+        cfg.LoginProvider  = r.Provider;
+        cfg.SessionUser    = r.SessionUser;
+        cfg.SessionToken   = r.SessionToken;
+        if (r.GuestTrialStart != null) cfg.GuestTrialStart = r.GuestTrialStart.Value.ToString("yyyy-MM-dd");
+        if (r.MemberTrialStart != null) cfg.MemberTrialStart = r.MemberTrialStart.Value.ToString("yyyy-MM-dd");
+        cfg.Save();
+
+        // 무료 이용기간 만료 → 근무시간 입력·주간 근무표만 잠근다(나머지는 사용 가능)
+        AppConfig.TrialExpired = r.TrialExpired;
 
         // ── 중복 실행 감지 ─────────────────────────────────────
         var session = SessionClient.Create(cfg.ApiBase, "manHours", cfg.LoginAccountId, cfg.ApiKey);
