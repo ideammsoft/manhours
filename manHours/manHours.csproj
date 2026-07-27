@@ -12,7 +12,7 @@
     <ApplicationIcon>Resources\app.ico</ApplicationIcon>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Version>1.0.0</Version>
-    <InformationalVersion>1.17</InformationalVersion>
+    <InformationalVersion>1.18</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
