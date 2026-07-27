@@ -274,9 +274,7 @@ public class WeeklyScreen : UserControl
         _rows.Clear();
 
         // 주간근무(사업명별) 시간 로드 — 동명이인 구분을 위해 이름+전화번호로 키를 잡는다.
-        // 전화번호가 없는 예전 데이터는 이름만으로도 찾을 수 있게 별도 보관.
         var times = new Dictionary<string, string[]>();
-        var legacyTimes = new Dictionary<string, string[]>();
         try
         {
             using var db = new Database(AppConfig.BaseDbPath);
@@ -295,13 +293,11 @@ public class WeeklyScreen : UserControl
                 }
                 string phone = pi >= 0 && pi < r.Length ? r[pi] : "";
                 times[AppConfig.WorkerKey(r[ni], phone)] = arr;
-                if (string.IsNullOrWhiteSpace(phone)) legacyTimes[r[ni]] = arr;
             }
         }
         catch { }
 
-        // 전체근로자에서 로스터 구성
-        var claimed = new List<(string Name, string Phone)>();   // 예전 행을 물려받은 근로자
+        // 전체근로자에서 로스터 구성 (이름+전화번호로 정확히 매칭 — 동명이인 분리)
         try
         {
             using var db = new Database(AppConfig.BaseDbPath);
@@ -315,43 +311,17 @@ public class WeeklyScreen : UserControl
                 string name = V(r, "이름");
                 if (string.IsNullOrWhiteSpace(name)) continue;
                 string phone = V(r, "전화번호");
-                // 이름+전화번호로 먼저 찾고, 없으면 전화번호 없던 예전 데이터를 이름으로 찾는다.
-                if (!times.TryGetValue(AppConfig.WorkerKey(name, phone), out var t)
-                    && legacyTimes.Remove(name, out t))       // 한 번만 물려받아 동명이인이 공유하지 않게
-                    claimed.Add((name, phone));
                 _rows.Add(new Row
                 {
                     Name = name, Jumin = V(r, "생년월일6자리"), Phone = phone,
                     Addr = V(r, "거주지역"), Wage = V(r, "시급"), Status = status,
-                    Times = t ?? new string[7],
+                    Times = times.TryGetValue(AppConfig.WorkerKey(name, phone), out var t) ? t : new string[7],
                 });
             }
         }
         catch { }
 
-        MigrateWeeklyPhones(claimed);
-
         _lblStatus.Text = $"  {_project}  |  근로자 {_rows.Count}명  |  요일 칸을 눌러 시간을 선택하세요 · 지우기: 셀 선택 후 Del 또는 우클릭";
-    }
-
-    // 전화번호 없이 저장된 예전 주간근무 행에 전화번호를 채워 넣는다(동명이인 분리용).
-    // 화면에 보이는 그대로를 기록할 뿐 시간 데이터는 건드리지 않으므로, 저장 버튼과 달리 안전하다.
-    void MigrateWeeklyPhones(List<(string Name, string Phone)> claimed)
-    {
-        if (claimed.Count == 0) return;
-        try
-        {
-            using var db = new Database(AppConfig.BaseDbPath);
-            foreach (var (name, phone) in claimed)
-            {
-                if (string.IsNullOrWhiteSpace(phone)) continue;
-                db.Execute(
-                    "UPDATE \"주간근무\" SET \"전화번호\"=@p0 " +
-                    "WHERE \"사업명\"=@p1 AND \"이름\"=@p2 AND (\"전화번호\" IS NULL OR \"전화번호\"='')",
-                    phone, _project, name);
-            }
-        }
-        catch { }
     }
 
     void Reload() { LoadRows(); RefreshTimeOptions(); RefreshGrid(); }

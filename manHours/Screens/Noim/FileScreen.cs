@@ -176,10 +176,10 @@ public class FileScreen : UserControl
             Font = ThemeManager.F(9.5f),
             Margin = new Padding(0, 2, 4, 0),
         };
-        _txtSearch.KeyDown += (_, e) => { if (e.KeyCode == Keys.Return) AddByName(); };
+        _txtSearch.KeyDown += (_, e) => { if (e.KeyCode == Keys.Return) AddSmart(); };
         searchRow.Controls.Add(_txtSearch);
         var btnAdd = MakeBtn("추가", 60, 26);
-        btnAdd.Click += (_, _) => AddCheckedWorkers();
+        btnAdd.Click += (_, _) => AddSmart();
         searchRow.Controls.Add(btnAdd);
         lay.Controls.Add(searchRow, 0, 2);
 
@@ -324,7 +324,12 @@ public class FileScreen : UserControl
         using var db = new Database(AppConfig.BaseDbPath);
         db.EnsureTable("전체근로자", AppConfig.WorkerCols);
         var (cols, rows) = db.SelectStrings("전체근로자");
-        foreach (var row in rows)
+        // 성명 가나다순 정렬 (한글 정렬)
+        int nameCol = Array.IndexOf(cols, "이름");
+        var ordered = nameCol >= 0
+            ? rows.OrderBy(r => nameCol < r.Length ? r[nameCol] : "", StringComparer.Create(new System.Globalization.CultureInfo("ko-KR"), false))
+            : rows.AsEnumerable();
+        foreach (var row in ordered)
         {
             var cells = new object[VisibleColIdx.Length + 1];
             cells[0] = false;
@@ -446,6 +451,14 @@ public class FileScreen : UserControl
         if (added == 0) MessageBox.Show("추가할 항목을 체크하세요.", "알림");
         _chkAllLeft.Checked = false;
         UpdateCount();
+    }
+
+    // 체크된 항목이 있으면 그것들을, 없으면 성명 입력으로 추가한다.
+    void AddSmart()
+    {
+        for (int r = 0; r < _grdAll.Rows.Count; r++)
+            if (_grdAll.Rows[r].Cells[0].Value is true) { AddCheckedWorkers(); return; }
+        AddByName();
     }
 
     void AddByName()

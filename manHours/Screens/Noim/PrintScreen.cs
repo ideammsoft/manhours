@@ -622,6 +622,10 @@ public class PrintScreen : UserControl
         var chk = CheckedWorkers();
         if (chk.Count == 0) { MessageBox.Show("인쇄할 인원을 선택하세요.", "알림"); return; }
 
+        // 설정(상호 등)·근로자 정보가 그새 바뀌었을 수 있으니 최신값으로 다시 읽는다.
+        LoadBusiSettings();
+        LoadFullWorkers();
+
         var tpl    = AppConfig.SamplePath(tplName);
         bool hasTpl = File.Exists(tpl);
         if (!hasTpl)
