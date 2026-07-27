@@ -12,7 +12,7 @@
     <ApplicationIcon>Resources\app.ico</ApplicationIcon>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Version>1.0.0</Version>
-    <InformationalVersion>1.19</InformationalVersion>
+    <InformationalVersion>1.20</InformationalVersion>
     <!-- 버전 뒤에 +git해시가 붙지 않도록 -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>

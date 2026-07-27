@@ -557,8 +557,20 @@ public class MainForm : Form
         if (idx >= 0) _cbProject.SelectedIndex = idx;
     }
 
-    void OnProjectChanged() { LoadCompany(); }
-    void OnYearMonthChanged() { /* 필요시 화면 갱신 */ }
+    void OnProjectChanged() { LoadCompany(); OnYearMonthChanged(); }
+
+    // 년/월이 바뀌면 현재 보고 있는 화면을 그 달 기준으로 다시 로드한다.
+    // (인원선택은 이때 '이전 달 데이터 불러오기'를 즉시 물어본다)
+    void OnYearMonthChanged()
+    {
+        switch (_current)
+        {
+            case FileScreen:    ShowScreen("파일");    break;
+            case WorkerScreen:  ShowScreen("지급대장"); break;
+            case PrintScreen:   ShowScreen("프린트");   break;
+            case WeeklyScreen:  ShowScreen("주간");    break;
+        }
+    }
 
     void LoadCompany()
     {

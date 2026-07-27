@@ -642,12 +642,16 @@ public class PrintScreen : UserControl
         Cursor = Cursors.WaitCursor;
         try
         {
-            if (hasTpl) File.Copy(tpl, tmpXlsx, true);
-            using (var wb = hasTpl ? new XLWorkbook(tmpXlsx) : new XLWorkbook())
+            using (var wb = hasTpl ? new XLWorkbook(tpl) : new XLWorkbook())
             {
                 if (!hasTpl) wb.Worksheets.Add(tplName);
                 fill(wb, chk);
-                wb.SaveAs(tmpXlsx);
+                // 메모리 스트림으로 저장 후 파일에 쓴다.
+                // (원본 파일을 열어 같은/복사본 경로로 SaveAs 하면 환경에 따라
+                //  in-place 셀 편집이 반영되지 않는 경우가 있어 이를 회피)
+                using var ms = new MemoryStream();
+                wb.SaveAs(ms);
+                File.WriteAllBytes(tmpXlsx, ms.ToArray());
             }
 
             bool hasPdf = TryExportPdf(tmpXlsx, tmpPdf);
@@ -1000,13 +1004,13 @@ public class PrintScreen : UserControl
     // ── 교부확인서 채우기 ─────────────────────────────────
     void FillGyobu(XLWorkbook wb, List<int> chk)
     {
-        string site    = BS("명칭"); if (string.IsNullOrEmpty(site)) site = BS("매장유형");
-        string company = BS("상호");
+        string company   = BS("상호");
+        string workplace = string.IsNullOrEmpty(BS("근무장소")) ? BS("소재지") : BS("근무장소");
 
         var ws = wb.Worksheet(1);
         ws.Cell(1, 1).Value = $"노무비 명세표 교부확인서({_year}년{_month:D2}월)";
-        ws.Cell(3, 1).Value = $"현장명 : {site}";
-        ws.Cell(4, 1).Value = $"회사명 : {company}";
+        ws.Cell(3, 1).Value = $"상호 : {company}";
+        ws.Cell(4, 1).Value = $"근무장소 : {workplace}";
         ws.Cell(5, 1).Value = $"   '{_year}년 {_month:D2}월분 노무비 명세표를 수령하였음을 확인합니다.";
 
         const int DATA_START = 7;
@@ -1014,13 +1018,13 @@ public class PrintScreen : UserControl
         {
             var d  = _workers[chk[i]];
             int r  = DATA_START + i;
-            // 행이 부족하면 이전 행 서식 복사
-            if (ws.LastRowUsed()?.RowNumber() < r)
-                ws.Row(r - 1).CopyTo(ws.Row(r));
             ws.Cell(r, 1).Value = i + 1;
             ws.Cell(r, 2).Value = d[I_NAME];
             ws.Cell(r, 3).Value = d[I_JUMIN];
             ws.Cell(r, 4).Value = d[I_PHONE];
+            ws.Cell(r, 5).Value = " ";   // 교부방법: 손으로 기입
+            ws.Cell(r, 6).Value = " ";   // 교부일자: 손으로 기입
+            ws.Cell(r, 7).Value = " ";   // 서명: 손으로 기입
         }
     }
 
