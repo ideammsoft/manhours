@@ -10,9 +10,10 @@ static class AppConfig
     public const string WebUrl  = "http://www.mmsoft.co.kr";
 
     public static string Version =>
-        typeof(AppConfig).Assembly
+        (typeof(AppConfig).Assembly
             .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
-            ?.InformationalVersion ?? "1.00";
+            ?.InformationalVersion ?? "1.00")
+            .Split('+')[0];   // +git해시 등 빌드 메타데이터 제거
 
     static readonly string DefaultBaseDir = @"C:\mmsoft\맨아워즈";
     static string? _baseDir;

@@ -876,26 +876,34 @@ public class SettingsDialog : Form
         var row  = _grdWorkers.SelectedRows[0];
         var vals = Enumerable.Range(0, AppConfig.WorkerCols.Length)
             .Select(i => row.Cells[i].Value?.ToString() ?? "").ToArray();
-        string oldName = vals[0];
+        int pi = Array.IndexOf(AppConfig.WorkerCols, "전화번호");
+        string oldName  = vals[0];
+        string oldPhone = pi >= 0 && pi < vals.Length ? vals[pi] : "";
         var dlg = new WorkerDialog(vals);
         if (dlg.ShowDialog() != DialogResult.OK) return;
         var nv   = dlg.Values;
         using var db = new Database(AppConfig.BaseDbPath);
+        int n = AppConfig.WorkerCols.Length;
         var sets = string.Join(", ", AppConfig.WorkerCols.Select((c, i) => $"\"{c}\"=@p{i}"));
-        db.Execute($"UPDATE \"전체근로자\" SET {sets} WHERE \"이름\"=@p{AppConfig.WorkerCols.Length}",
-            nv.Cast<object?>().Append(oldName).ToArray());
+        // 동명이인 보호: 예전 이름+전화번호로 정확히 한 명만 수정
+        db.Execute($"UPDATE \"전체근로자\" SET {sets} WHERE \"이름\"=@p{n} AND IFNULL(\"전화번호\",'')=@p{n + 1}",
+            nv.Cast<object?>().Append(oldName).Append(oldPhone).ToArray());
         LoadWorkers();
     }
 
     void DeleteWorker()
     {
         if (_grdWorkers.SelectedRows.Count == 0) return;
-        string name = _grdWorkers.SelectedRows[0].Cells[0].Value?.ToString() ?? "";
+        int pi = Array.IndexOf(AppConfig.WorkerCols, "전화번호");
+        var sel = _grdWorkers.SelectedRows[0];
+        string name  = sel.Cells[0].Value?.ToString() ?? "";
+        string phone = pi >= 0 ? sel.Cells[pi].Value?.ToString() ?? "" : "";
         var ans = MessageBox.Show($"\"{name}\"을(를) 전체근로자 목록에서 삭제하시겠습니까?",
             "삭제 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (ans != DialogResult.Yes) return;
         using var db = new Database(AppConfig.BaseDbPath);
-        db.Execute("DELETE FROM \"전체근로자\" WHERE \"이름\"=@p0", name);
+        // 동명이인 보호: 이름+전화번호로 정확히 한 명만 삭제
+        db.Execute("DELETE FROM \"전체근로자\" WHERE \"이름\"=@p0 AND IFNULL(\"전화번호\",'')=@p1", name, phone);
         LoadWorkers();
     }
 
