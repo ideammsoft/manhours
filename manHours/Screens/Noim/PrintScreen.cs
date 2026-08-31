@@ -146,6 +146,8 @@ public class PrintScreen : UserControl
         _btnMyungse = MakePrintBtn($"{_month}월 임금명세서", 120, PrintMyungseo);
         printFlow.Controls.Add(_btnMyungse);
         printFlow.Controls.Add(MakePrintBtn("교부확인서",  100, PrintGyobu));
+        printFlow.Controls.Add(MakePrintBtn("일별 내역 및 합계", 130, PrintIlbyeol));
+        printFlow.Controls.Add(MakePrintBtn("근로내용확인신고서", 140, PrintGoyong));
         printFlow.Controls.Add(MakePrintBtn("신분증사본",  100, PrintSinbun));
         _btnSms = MakePrintBtn("📱 문자 발송", 120, OpenSmsDialog);
         _btnSms.BackColor = Color.FromArgb(30, 50, 100);
@@ -1028,7 +1030,406 @@ public class PrintScreen : UserControl
         }
     }
 
-    // ── 고용산재신고서 채우기 ─────────────────────────────
+    // ── 일별 내역 및 합계 (파트타이머 급여 계산) ───────────────────────────────
+    const double BRK4 = 0.5, BRK8 = 1.0;   // 4시간↑ 30분, 8시간↑ 60분 휴게(시간)
+    const double JUHU_MIN = 15;            // 주휴 발생 기준(주 15시간)
+
+    void PrintIlbyeol()
+    {
+        var chk = CheckedWorkers();
+        if (chk.Count == 0) { MessageBox.Show("인쇄할 인원을 선택하세요.", "알림"); return; }
+        LoadBusiSettings();
+
+        var weeks = WeeksForMonth(_year, _month);
+        int sel = AskIlbyeolRange(weeks);      // -1=취소, 0=전체, 1..N=주차
+        if (sel < 0) return;
+
+        var ts      = DateTime.Now.ToString("HHmmss");
+        var tmpXlsx = Path.Combine(Path.GetTempPath(), $"__ilbyeol_{ts}.xlsx");
+        var tmpPdf  = Path.ChangeExtension(tmpXlsx, ".pdf");
+        Cursor = Cursors.WaitCursor;
+        try
+        {
+            var cache = new Dictionary<(int, int), Dictionary<string, string[]>>();
+            using (var wb = new XLWorkbook())
+            {
+                for (int i = 0; i < chk.Count; i++)
+                    BuildIlbyeolSheet(wb, _workers[chk[i]], i, weeks, sel, cache);
+                using var ms = new MemoryStream();
+                wb.SaveAs(ms);
+                File.WriteAllBytes(tmpXlsx, ms.ToArray());
+            }
+            bool hasPdf = TryExportPdf(tmpXlsx, tmpPdf);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(hasPdf ? tmpPdf : tmpXlsx) { UseShellExecute = true });
+
+            if (MessageBox.Show("엑셀 파일로 저장하시겠습니까? (수식 포함)", "저장",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            {
+                using var dlg = new SaveFileDialog { Filter = "Excel 파일|*.xlsx", FileName = $"{_project}_{_year}{_month:D2}_일별내역.xlsx" };
+                if (dlg.ShowDialog() == DialogResult.OK) File.Copy(tmpXlsx, dlg.FileName, true);
+            }
+        }
+        catch (Exception ex) { MessageBox.Show($"오류: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        finally { Cursor = Cursors.Default; }
+    }
+
+    // 출력 범위 선택 (전체 / n주차)
+    int AskIlbyeolRange(List<(string Label, DateTime Mon, DateTime Sun)> weeks)
+    {
+        using var dlg = new Form
+        {
+            Text = "출력 범위 선택", FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false,
+            ClientSize = new Size(320, 110),
+        };
+        var cmb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Bounds = new Rectangle(20, 18, 280, 26), Font = ThemeManager.F(10f) };
+        cmb.Items.Add($"{_month}월 전체");
+        for (int i = 0; i < weeks.Count; i++) cmb.Items.Add($"{_month}월 {i + 1}주차 ({weeks[i].Label})");
+        cmb.SelectedIndex = 0;
+        var ok     = new Button { Text = "확인", DialogResult = DialogResult.OK, Bounds = new Rectangle(120, 60, 80, 30) };
+        var cancel = new Button { Text = "취소", DialogResult = DialogResult.Cancel, Bounds = new Rectangle(210, 60, 80, 30) };
+        dlg.Controls.Add(cmb); dlg.Controls.Add(ok); dlg.Controls.Add(cancel);
+        dlg.AcceptButton = ok; dlg.CancelButton = cancel;
+        return dlg.ShowDialog(FindForm()) == DialogResult.OK ? cmb.SelectedIndex : -1;
+    }
+
+    // 월~일 주 목록: 그 주의 '일요일'이 이 달에 속하는 주만 (마지막 이월 주는 제외)
+    static List<(string Label, DateTime Mon, DateTime Sun)> WeeksForMonth(int year, int month)
+    {
+        var list = new List<(string, DateTime, DateTime)>();
+        var first = new DateTime(year, month, 1);
+        int back = ((int)first.DayOfWeek + 6) % 7;            // 월=0
+        var monthEnd = new DateTime(year, month, DateTime.DaysInMonth(year, month));
+        for (var mon = first.AddDays(-back); ; mon = mon.AddDays(7))
+        {
+            var sun = mon.AddDays(6);
+            if (sun < first) continue;
+            if (sun > monthEnd) break;                        // 일요일이 다음 달 → 익월로 이월
+            list.Add(($"{mon.Month}/{mon.Day}~{sun.Month}/{sun.Day}", mon, sun));
+        }
+        return list;
+    }
+
+    // 그 달(년/월) 지급대장의 근로자별 일자별 시각범위
+    Dictionary<string, string[]> LoadDayRanges(int year, int month)
+    {
+        var map = new Dictionary<string, string[]>();
+        try
+        {
+            var path = AppConfig.MonthlyDbPath(year, month, _project);
+            if (!File.Exists(path)) return map;
+            using var db = new Database(path);
+            if (!db.TableExists("지급대장")) return map;
+            var (cols, rows) = db.SelectStrings("지급대장");
+            int ni = Array.IndexOf(cols, "이름"), ji = Array.IndexOf(cols, "생년월일6자리");
+            var dayIdx = new int[32];
+            for (int day = 1; day <= 31; day++) dayIdx[day] = Array.IndexOf(cols, $"{day}일");
+            foreach (var r in rows)
+            {
+                string key = (ni >= 0 && ni < r.Length ? r[ni] : "") + "|" + (ji >= 0 && ji < r.Length ? r[ji] : "");
+                var arr = new string[32];
+                for (int day = 1; day <= 31; day++) { int ci = dayIdx[day]; arr[day] = ci >= 0 && ci < r.Length ? r[ci] : ""; }
+                map[key] = arr;
+            }
+        }
+        catch { }
+        return map;
+    }
+
+    // 근로자·날짜의 (총근무, 휴게, 정산) 시간 — 인접 달까지 조회(주 경계)
+    (double gross, double brk, double net) DayHours(Dictionary<(int, int), Dictionary<string, string[]>> cache, string key, DateTime dt)
+    {
+        var mk = (dt.Year, dt.Month);
+        if (!cache.TryGetValue(mk, out var mm)) { mm = LoadDayRanges(dt.Year, dt.Month); cache[mk] = mm; }
+        string range = mm.TryGetValue(key, out var arr) && dt.Day <= 31 ? arr[dt.Day] : "";
+        var (st, en) = WorkerScreen.ParseRange(range);
+        if (st < 0) return (0, 0, 0);
+        double gross = en - st;
+        double brk = gross >= 8 ? BRK8 : gross >= 4 ? BRK4 : 0;
+        return (gross, brk, gross - brk);
+    }
+
+    // 한 주(월~일)의 주휴수당 = 주 정산시간≥15 이면 (평균 일근로시간 × 시급)
+    double WeekJuhu(Dictionary<(int, int), Dictionary<string, string[]>> cache, string key, DateTime mon, DateTime sun, double wage)
+    {
+        double net = 0; int worked = 0;
+        for (var dt = mon; dt <= sun; dt = dt.AddDays(1))
+        {
+            var (_, _, n) = DayHours(cache, key, dt);
+            if (n > 0) { net += n; worked++; }
+        }
+        if (net < JUHU_MIN || worked == 0) return 0;
+        return net / worked * wage;
+    }
+
+    static bool IsHolidayDate(DateTime dt) => AppConfig.GetHolidayDays(dt.Year, dt.Month).Contains(dt.Day);
+
+    void BuildIlbyeolSheet(XLWorkbook wb, string[] d, int idx,
+        List<(string Label, DateTime Mon, DateTime Sun)> weeks, int sel,
+        Dictionary<(int, int), Dictionary<string, string[]>> cache)
+    {
+        string name = d[I_NAME];
+        string key  = name + "|" + d[I_JUMIN];
+        double wage = double.TryParse(d[I_WAGE], out var w) ? w : 0;
+        string company = BS("상호");
+
+        // 표시 날짜 + 주휴 대상 주
+        List<DateTime> days;
+        List<(string Label, DateTime Mon, DateTime Sun)> juhuWeeks;
+        if (sel == 0)
+        {
+            var firstMon = weeks.Count > 0 ? weeks[0].Mon : new DateTime(_year, _month, 1);
+            var monthEnd = new DateTime(_year, _month, DateTime.DaysInMonth(_year, _month));
+            days = []; for (var dt = firstMon; dt <= monthEnd; dt = dt.AddDays(1)) days.Add(dt);
+            juhuWeeks = weeks;
+        }
+        else
+        {
+            var wk = weeks[sel - 1];
+            days = []; for (var dt = wk.Mon; dt <= wk.Sun; dt = dt.AddDays(1)) days.Add(dt);
+            juhuWeeks = [wk];
+        }
+
+        var ws = wb.Worksheets.Add(SafeSheetName(name, idx));
+        var wd = new[] { "일", "월", "화", "수", "목", "금", "토" };
+
+        // 제목 + 이름
+        ws.Cell(1, 1).Value = $"{company} 파트타이머 급여 계산";
+        ws.Range(1, 1, 1, 9).Merge();
+        ws.Cell(1, 1).Style.Font.Bold = true;
+        ws.Cell(1, 1).Style.Font.FontSize = 14;
+        ws.Cell(1, 1).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        ws.Cell(2, 3).Value = name;
+        ws.Cell(2, 3).Style.Font.Bold = true;
+
+        // 헤더
+        string[] hdr = { "일", "요일", "공휴일 여부", "총 근무시간", "Total 휴게 시간", "정산 대상 근무시간", "공휴일 반영 후", "시급", "급여" };
+        for (int c = 0; c < 9; c++)
+        {
+            var hc = ws.Cell(3, c + 1);
+            hc.Value = hdr[c];
+            hc.Style.Font.Bold = true;
+            hc.Style.Fill.BackgroundColor = XLColor.FromArgb(226, 232, 240);
+            hc.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        }
+
+        int firstRow = 4, r = 4;
+        foreach (var dt in days)
+        {
+            var (gross, brk, _) = DayHours(cache, key, dt);
+            ws.Cell(r, 1).Value = $"{dt.Month}월{dt.Day}일";
+            ws.Cell(r, 2).Value = wd[(int)dt.DayOfWeek];
+            ws.Cell(r, 3).Value = IsHolidayDate(dt) ? "O" : "X";
+            ws.Cell(r, 4).Value = Math.Round(gross, 2);
+            ws.Cell(r, 5).Value = Math.Round(brk, 2);
+            ws.Cell(r, 6).FormulaA1 = $"=D{r}-E{r}";                        // 정산 = 총 - 휴게
+            ws.Cell(r, 7).FormulaA1 = $"=IF(C{r}=\"O\",F{r}*1.5,F{r})";     // 공휴일 반영(1.5배)
+            ws.Cell(r, 8).Value = wage;
+            ws.Cell(r, 9).FormulaA1 = $"=G{r}*H{r}";                        // 급여 = 반영시간 × 시급
+            r++;
+        }
+        int lastRow = r - 1;
+
+        // 합계
+        ws.Cell(r, 3).Value = "합계";
+        ws.Cell(r, 4).FormulaA1 = $"=SUM(D{firstRow}:D{lastRow})";
+        ws.Cell(r, 6).FormulaA1 = $"=SUM(F{firstRow}:F{lastRow})";
+        ws.Cell(r, 9).FormulaA1 = $"=SUM(I{firstRow}:I{lastRow})";
+        ws.Row(r).Style.Font.Bold = true;
+        int sumRow = r; r++;
+
+        // 주휴수당 (주차별)
+        int juhuFirst = r;
+        foreach (var wk in juhuWeeks)
+        {
+            ws.Cell(r, 6).Value = "주휴수당";
+            ws.Cell(r, 8).Value = $"{Array.FindIndex(weeks.ToArray(), x => x.Mon == wk.Mon) + 1}주차";
+            ws.Cell(r, 9).Value = Math.Round(WeekJuhu(cache, key, wk.Mon, wk.Sun, wage));
+            r++;
+        }
+        int juhuLast = r - 1;
+
+        // 총 지급액 = 급여합 + 주휴합
+        ws.Cell(r, 6).Value = "총 지급액";
+        ws.Cell(r, 6).Style.Font.Bold = true;
+        string juhuSum = juhuLast >= juhuFirst ? $"+SUM(I{juhuFirst}:I{juhuLast})" : "";
+        ws.Cell(r, 9).FormulaA1 = $"=I{sumRow}{juhuSum}";
+        ws.Cell(r, 9).Style.Font.Bold = true;
+        r += 2;
+
+        // 주석
+        ws.Cell(r++, 1).Value = "*일주일동안 결근없이 주 15시간 이상 근무한 경우 주휴수당 지급 (일주일 평균 일근로시간*시급)";
+        ws.Cell(r++, 1).Value = "*주휴수당은 월~일 근무 기준으로 계산하며 월마지막주는 익월 첫주와 함께 계산하여 익월에 포함하여 지급";
+        ws.Cell(r++, 1).Value = "*공휴일근로시 휴일근로수당 1.5 지급";
+
+        // 서식
+        ws.Range(3, 1, lastRow, 9).Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
+        ws.Range(3, 1, lastRow, 9).Style.Border.InsideBorder = XLBorderStyleValues.Thin;
+        ws.Range(3, 1, lastRow, 9).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        ws.Column(1).Width = 10; ws.Column(2).Width = 6; ws.Column(3).Width = 11;
+        ws.Column(4).Width = 12; ws.Column(5).Width = 14; ws.Column(6).Width = 16;
+        ws.Column(7).Width = 13; ws.Column(8).Width = 10; ws.Column(9).Width = 12;
+        ws.Cell(sumRow, 9).Style.NumberFormat.Format = "#,##0";
+        ws.Range(firstRow, 8, r, 9).Style.NumberFormat.Format = "#,##0";
+        ws.PageSetup.PageOrientation = XLPageOrientation.Portrait;
+        ws.PageSetup.FitToPages(1, 1);
+    }
+
+    // 시트 이름(31자·금지문자 제한, 중복 방지)
+    static string SafeSheetName(string name, int idx)
+    {
+        var s = string.IsNullOrWhiteSpace(name) ? $"인원{idx + 1}" : name;
+        foreach (var ch in new[] { '\\', '/', '?', '*', '[', ']', ':' }) s = s.Replace(ch, ' ');
+        if (s.Length > 27) s = s[..27];
+        return $"{s}_{idx + 1}";
+    }
+
+    // ── 근로내용 확인신고서 (일용근로자용) — 고용·산재 ──────────────────────────
+    void PrintGoyong()
+    {
+        var chk = CheckedWorkers();
+        if (chk.Count == 0) { MessageBox.Show("인쇄할 인원을 선택하세요.", "알림"); return; }
+        LoadBusiSettings(); LoadFullWorkers();
+
+        var ts      = DateTime.Now.ToString("HHmmss");
+        var tmpXlsx = Path.Combine(Path.GetTempPath(), $"__goyong_{ts}.xlsx");
+        var tmpPdf  = Path.ChangeExtension(tmpXlsx, ".pdf");
+        Cursor = Cursors.WaitCursor;
+        try
+        {
+            using (var wb = new XLWorkbook())
+            {
+                // 4명씩 한 장(시트)
+                for (int p = 0; p * 4 < chk.Count; p++)
+                {
+                    var page = chk.Skip(p * 4).Take(4).Select(i => _workers[i]).ToList();
+                    BuildGoyongSheet(wb.Worksheets.Add($"신고서{p + 1}"), page);
+                }
+                using var ms = new MemoryStream();
+                wb.SaveAs(ms);
+                File.WriteAllBytes(tmpXlsx, ms.ToArray());
+            }
+            bool hasPdf = TryExportPdf(tmpXlsx, tmpPdf);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(hasPdf ? tmpPdf : tmpXlsx) { UseShellExecute = true });
+            if (MessageBox.Show("엑셀 파일로 저장하시겠습니까?", "저장", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            {
+                using var dlg = new SaveFileDialog { Filter = "Excel 파일|*.xlsx", FileName = $"{_project}_{_year}{_month:D2}_근로내용확인신고서.xlsx" };
+                if (dlg.ShowDialog() == DialogResult.OK) File.Copy(tmpXlsx, dlg.FileName, true);
+            }
+        }
+        catch (Exception ex) { MessageBox.Show($"오류: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        finally { Cursor = Cursors.Default; }
+    }
+
+    // 근로자 1명의 집계 (근로일수, 일평균시간, 임금총액, 소득세, 지방소득세, 근로일 집합)
+    (int days, double avgH, long pay, long tax, long minTax, HashSet<int> worked) GoyongAgg(string[] d)
+    {
+        var worked = new HashSet<int>();
+        double netSum = 0;
+        for (int day = 1; day <= _lastDay; day++)
+        {
+            var (st, en) = WorkerScreen.ParseRange(d[D_DATE_DB + day - 1]);
+            if (st < 0) continue;
+            double gross = en - st;
+            double brk = gross >= 8 ? BRK8 : gross >= 4 ? BRK4 : 0;
+            worked.Add(day);
+            netSum += gross - brk;
+        }
+        int days = worked.Count;
+        return (days, days > 0 ? netSum / days : 0, ParseLong(d[I_TOTAL]), ParseLong(d[I_TAX]), ParseLong(d[I_MINTAX]), worked);
+    }
+
+    void BuildGoyongSheet(IXLWorksheet ws, List<string[]> page)
+    {
+        // 열: A=라벨, 근로자 4명 × 5열(일자격자). B~F, G~K, L~P, Q~U
+        int[] wc = { 2, 7, 12, 17 };   // 각 근로자 블록 시작 열
+        const int LASTCOL = 21;        // U
+        void Merge(int r1, int c1, int r2, int c2) => ws.Range(r1, c1, r2, c2).Merge();
+        void Box(int r1, int c1, int r2, int c2)
+        {
+            var rg = ws.Range(r1, c1, r2, c2);
+            rg.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
+            rg.Style.Border.InsideBorder  = XLBorderStyleValues.Thin;
+        }
+        void Lbl(int r, string t) { ws.Cell(r, 1).Value = t; ws.Cell(r, 1).Style.Font.FontSize = 9; ws.Cell(r, 1).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center; }
+
+        // 제목
+        Merge(1, 1, 1, LASTCOL);
+        ws.Cell(1, 1).Value = $"[ ]고용보험  [ ]산재보험   근로내용 확인신고서(일용근로자용)  ({_year}년 {_month}월분)";
+        ws.Cell(1, 1).Style.Font.Bold = true; ws.Cell(1, 1).Style.Font.FontSize = 13;
+        ws.Cell(1, 1).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+        // 공통 사업장
+        int r = 3;
+        void KV(int row, string k1, string v1, string k2, string v2, int split)
+        {
+            ws.Cell(row, 1).Value = k1; Merge(row, 2, row, split); ws.Cell(row, 2).Value = v1;
+            ws.Cell(row, split + 1).Value = k2; Merge(row, split + 2, row, LASTCOL); ws.Cell(row, split + 2).Value = v2;
+            Box(row, 1, row, LASTCOL);
+        }
+        KV(r++, "사업장관리번호", BS("사업장관리번호"), "명칭", BS("명칭").Length > 0 ? BS("명칭") : BS("상호"), 11);
+        KV(r++, "사업자등록번호", BS("사업장등록번호"), "하수급인관리번호", "", 11);
+        ws.Cell(r, 1).Value = "소재지"; Merge(r, 2, r, LASTCOL); ws.Cell(r, 2).Value = BS("소재지"); Box(r, 1, r, LASTCOL); r++;
+        KV(r++, "전화번호", BS("유선전화번호"), "팩스번호", BS("FAX번호"), 11);
+        r++;
+
+        // 근로자 정보
+        int infoTop = r;
+        Lbl(r, "성명");            for (int i = 0; i < page.Count; i++) { Merge(r, wc[i], r, wc[i] + 4); ws.Cell(r, wc[i]).Value = page[i][I_NAME]; } Box(r, 1, r, LASTCOL); r++;
+        Lbl(r, "주민등록번호");     for (int i = 0; i < page.Count; i++) { Merge(r, wc[i], r, wc[i] + 4); ws.Cell(r, wc[i]).Value = page[i][I_JUMIN]; } Box(r, 1, r, LASTCOL); r++;
+        Lbl(r, "전화번호");        for (int i = 0; i < page.Count; i++) { Merge(r, wc[i], r, wc[i] + 4); ws.Cell(r, wc[i]).Value = page[i][I_PHONE]; } Box(r, 1, r, LASTCOL); r++;
+        Lbl(r, "직종부호");        Box(r, 1, r, LASTCOL); r++;
+
+        // 근로일수 격자 (1~31, 근로일에 "O")
+        int gridTop = r;
+        Merge(gridTop, 1, gridTop + 6, 1); Lbl(gridTop, "근로일수\n(\"O\"표시)");
+        ws.Cell(gridTop, 1).Style.Alignment.WrapText = true;
+        for (int gr = 0; gr < 7; gr++)      // 7행 × 5열 = 35칸(1~31)
+        {
+            for (int i = 0; i < page.Count; i++)
+            {
+                var (_, _, _, _, _, worked) = GoyongAgg(page[i]);
+                for (int gcCol = 0; gcCol < 5; gcCol++)
+                {
+                    int day = gr * 5 + gcCol + 1;
+                    if (day > 31) continue;
+                    var c = ws.Cell(gridTop + gr, wc[i] + gcCol);
+                    c.Value = worked.Contains(day) ? $"{day} O" : day.ToString();
+                    c.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+                    c.Style.Font.FontSize = 8;
+                    if (worked.Contains(day)) c.Style.Font.Bold = true;
+                }
+            }
+        }
+        Box(gridTop, 1, gridTop + 6, LASTCOL); r = gridTop + 7;
+
+        // 집계
+        void Agg(int row, string label, Func<(int days, double avgH, long pay, long tax, long minTax, HashSet<int> w), string> fmt)
+        {
+            Lbl(row, label);
+            for (int i = 0; i < page.Count; i++) { Merge(row, wc[i], row, wc[i] + 4); ws.Cell(row, wc[i]).Value = fmt(GoyongAgg(page[i])); ws.Cell(row, wc[i]).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center; }
+            Box(row, 1, row, LASTCOL);
+        }
+        Agg(r++, "근로일수 / 일평균근로시간", a => $"{a.days}일 / {a.avgH:0.#}시간");
+        Agg(r++, "보수지급기초일수", a => $"{a.days}일");
+        Agg(r++, "보수총액", a => $"{a.pay:N0}원");
+        Agg(r++, "임금총액", a => $"{a.pay:N0}원");
+        Agg(r++, "이직사유 코드", _ => "");
+        Lbl(r, "국세청 일용근로소득신고"); Box(r, 1, r, LASTCOL); r++;
+        Agg(r++, "  지급월", _ => $"{_month}월");
+        Agg(r++, "  총지급액(과세소득)", a => $"{a.pay:N0}원");
+        Agg(r++, "  비과세소득", _ => "0원");
+        Agg(r++, "  소득세", a => $"{a.tax:N0}원");
+        Agg(r++, "  지방소득세", a => $"{a.minTax:N0}원");
+
+        // 서식
+        ws.Column(1).Width = 16;
+        for (int c = 2; c <= LASTCOL; c++) ws.Column(c).Width = 4.6;
+        ws.Range(infoTop, 1, r - 1, LASTCOL).Style.Font.FontSize = 9;
+        ws.PageSetup.PageOrientation = XLPageOrientation.Landscape;
+        ws.PageSetup.FitToPages(1, 1);
+    }
+
     // ── 헬퍼 ─────────────────────────────────────────────
     // 날짜 값: 비어있거나 0이면 0, 아니면 double
     static double ParseDayVal(string? s)

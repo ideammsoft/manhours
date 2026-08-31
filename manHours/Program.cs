@@ -33,7 +33,7 @@ internal static class Program
             SavedLoginPw     = cfg.SavedLoginPw,
             ApiKey           = cfg.ApiKey,
             GuestMessage     = "비회원은 1개월간 무료로 이용하실 수 있습니다.\n회원가입 시에는 6개월간 무료 이용 혜택이 있습니다.\n계속 하시려면 확인을 눌러주세요.",
-            GuestTrialMonths  = 1,
+            GuestTrialMonths  = IsMyPc() ? 12 : 1,   // 내 PC만 비회원 1년
             MemberTrialMonths = 6,
             GuestTrialStart  = DateTime.TryParse(cfg.GuestTrialStart, out var gs) ? gs : null,
             MemberTrialStart = DateTime.TryParse(cfg.MemberTrialStart, out var ms) ? ms : null,
@@ -131,6 +131,17 @@ internal static class Program
             return File.Exists(path) ? Image.FromFile(path) : null;
         }
         catch { return null; }
+    }
+
+    // 내 PC(개발 머신)에서만 비회원 무료기간을 길게 잡기 위한 판별
+    static bool IsMyPc()
+    {
+        try
+        {
+            return string.Equals(Environment.MachineName, "DESKTOP-VP8UE0J", StringComparison.OrdinalIgnoreCase)
+                || IsDevStartFolder();
+        }
+        catch { return false; }
     }
 
     static bool IsDevStartFolder()
