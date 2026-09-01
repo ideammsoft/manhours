@@ -1285,40 +1285,63 @@ public class PrintScreen : UserControl
     }
 
     // ── 근로내용 확인신고서 (일용근로자용) — 고용·산재 ──────────────────────────
-    void PrintGoyong()
-    {
-        var chk = CheckedWorkers();
-        if (chk.Count == 0) { MessageBox.Show("인쇄할 인원을 선택하세요.", "알림"); return; }
-        LoadBusiSettings(); LoadFullWorkers();
+    // 관공서 지정 서식 템플릿 샘플(고용산재신고서).xlsx 을 그대로 열어 값만 채운다.
+    void PrintGoyong() => RunPrint("고용산재신고서", "goyong", FillGoyong);
 
-        var ts      = DateTime.Now.ToString("HHmmss");
-        var tmpXlsx = Path.Combine(Path.GetTempPath(), $"__goyong_{ts}.xlsx");
-        var tmpPdf  = Path.ChangeExtension(tmpXlsx, ".pdf");
-        Cursor = Cursors.WaitCursor;
-        try
+    void FillGoyong(XLWorkbook wb, List<int> chk)
+    {
+        var tpl = wb.Worksheet(1);               // 템플릿 시트
+        int pages = (chk.Count + 3) / 4;         // 한 장에 4명
+        for (int p = 0; p < pages; p++)
         {
-            using (var wb = new XLWorkbook())
+            var ws   = p == 0 ? tpl : tpl.CopyTo(wb, $"신고서{p + 1}");
+            var page = chk.Skip(p * 4).Take(4).Select(i => _workers[i]).ToList();
+            FillGoyongPage(ws, page);
+        }
+    }
+
+    // 서식 한 장(근로자 최대 4명) 채우기 — 셀 위치는 템플릿에 맞춘다(모양 불변).
+    void FillGoyongPage(IXLWorksheet ws, List<string[]> page)
+    {
+        // 제목 년/월
+        ws.Cell(2, 20).Value = _year;    // T2 (년)
+        ws.Cell(2, 23).Value = _month;   // W2 (월)
+        // 공통 사업장
+        ws.Cell(5, 6).Value  = BS("사업장관리번호");                             // F5
+        ws.Cell(5, 13).Value = BS("명칭").Length > 0 ? BS("명칭") : BS("상호");  // M5
+        ws.Cell(8, 5).Value  = BS("소재지");                                     // E8
+        ws.Cell(9, 6).Value  = BS("유선전화번호");                               // F9
+
+        int[] col   = { 6, 11, 16, 21 };               // 근로자 4명 블록 시작 열(F/K/P/U)
+        int[] oRows = { 19, 21, 23, 25, 27, 29, 31 };  // 일자 숫자 아래 'O' 표시 행
+        for (int w = 0; w < 4; w++)
+        {
+            int c = col[w];
+            if (w < page.Count)
             {
-                // 4명씩 한 장(시트)
-                for (int p = 0; p * 4 < chk.Count; p++)
-                {
-                    var page = chk.Skip(p * 4).Take(4).Select(i => _workers[i]).ToList();
-                    BuildGoyongSheet(wb.Worksheets.Add($"신고서{p + 1}"), page);
-                }
-                using var ms = new MemoryStream();
-                wb.SaveAs(ms);
-                File.WriteAllBytes(tmpXlsx, ms.ToArray());
+                var d = page[w];
+                var (days, _, pay, tax, minTax, worked) = GoyongAgg(d);
+                ws.Cell(12, c).Value = d[I_NAME];
+                ws.Cell(13, c).Value = d[I_JUMIN];
+                ws.Cell(16, c).Value = d[I_PHONE];
+                foreach (int day in worked)                    // 근로일에 "O" (COUNTIF가 자동 집계)
+                    ws.Cell(oRows[(day - 1) / 5], c + (day - 1) % 5).Value = "O";
+                ws.Cell(33, c).Value = days;    // 보수지급기초일수
+                ws.Cell(34, c).Value = pay;     // 보수총액
+                ws.Cell(35, c).Value = pay;     // 임금총액
+                ws.Cell(40, c).Value = _month;  // 지급월
+                ws.Cell(41, c).Value = pay;     // 총지급액(과세소득)
+                ws.Cell(43, c).Value = 0;       // 비과세소득
+                ws.Cell(44, c).Value = tax;     // 소득세
+                ws.Cell(48, c).Value = minTax;  // 지방소득세
             }
-            bool hasPdf = TryExportPdf(tmpXlsx, tmpPdf);
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(hasPdf ? tmpPdf : tmpXlsx) { UseShellExecute = true });
-            if (MessageBox.Show("엑셀 파일로 저장하시겠습니까?", "저장", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            else
             {
-                using var dlg = new SaveFileDialog { Filter = "Excel 파일|*.xlsx", FileName = $"{_project}_{_year}{_month:D2}_근로내용확인신고서.xlsx" };
-                if (dlg.ShowDialog() == DialogResult.OK) File.Copy(tmpXlsx, dlg.FileName, true);
+                // 미사용 열: 템플릿 샘플값 제거
+                foreach (int rr in new[] { 12, 13, 16, 17, 33, 34, 35, 40, 41, 43, 44, 48 }) ws.Cell(rr, c).Value = "";
+                foreach (int oRow in oRows) for (int off = 0; off < 5; off++) ws.Cell(oRow, c + off).Value = "";
             }
         }
-        catch (Exception ex) { MessageBox.Show($"오류: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-        finally { Cursor = Cursors.Default; }
     }
 
     // 근로자 1명의 집계 (근로일수, 일평균시간, 임금총액, 소득세, 지방소득세, 근로일 집합)
@@ -1337,97 +1360,6 @@ public class PrintScreen : UserControl
         }
         int days = worked.Count;
         return (days, days > 0 ? netSum / days : 0, ParseLong(d[I_TOTAL]), ParseLong(d[I_TAX]), ParseLong(d[I_MINTAX]), worked);
-    }
-
-    void BuildGoyongSheet(IXLWorksheet ws, List<string[]> page)
-    {
-        // 열: A=라벨, 근로자 4명 × 5열(일자격자). B~F, G~K, L~P, Q~U
-        int[] wc = { 2, 7, 12, 17 };   // 각 근로자 블록 시작 열
-        const int LASTCOL = 21;        // U
-        void Merge(int r1, int c1, int r2, int c2) => ws.Range(r1, c1, r2, c2).Merge();
-        void Box(int r1, int c1, int r2, int c2)
-        {
-            var rg = ws.Range(r1, c1, r2, c2);
-            rg.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
-            rg.Style.Border.InsideBorder  = XLBorderStyleValues.Thin;
-        }
-        void Lbl(int r, string t) { ws.Cell(r, 1).Value = t; ws.Cell(r, 1).Style.Font.FontSize = 9; ws.Cell(r, 1).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center; }
-
-        // 제목
-        Merge(1, 1, 1, LASTCOL);
-        ws.Cell(1, 1).Value = $"[ ]고용보험  [ ]산재보험   근로내용 확인신고서(일용근로자용)  ({_year}년 {_month}월분)";
-        ws.Cell(1, 1).Style.Font.Bold = true; ws.Cell(1, 1).Style.Font.FontSize = 13;
-        ws.Cell(1, 1).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
-
-        // 공통 사업장
-        int r = 3;
-        void KV(int row, string k1, string v1, string k2, string v2, int split)
-        {
-            ws.Cell(row, 1).Value = k1; Merge(row, 2, row, split); ws.Cell(row, 2).Value = v1;
-            ws.Cell(row, split + 1).Value = k2; Merge(row, split + 2, row, LASTCOL); ws.Cell(row, split + 2).Value = v2;
-            Box(row, 1, row, LASTCOL);
-        }
-        KV(r++, "사업장관리번호", BS("사업장관리번호"), "명칭", BS("명칭").Length > 0 ? BS("명칭") : BS("상호"), 11);
-        KV(r++, "사업자등록번호", BS("사업장등록번호"), "하수급인관리번호", "", 11);
-        ws.Cell(r, 1).Value = "소재지"; Merge(r, 2, r, LASTCOL); ws.Cell(r, 2).Value = BS("소재지"); Box(r, 1, r, LASTCOL); r++;
-        KV(r++, "전화번호", BS("유선전화번호"), "팩스번호", BS("FAX번호"), 11);
-        r++;
-
-        // 근로자 정보
-        int infoTop = r;
-        Lbl(r, "성명");            for (int i = 0; i < page.Count; i++) { Merge(r, wc[i], r, wc[i] + 4); ws.Cell(r, wc[i]).Value = page[i][I_NAME]; } Box(r, 1, r, LASTCOL); r++;
-        Lbl(r, "주민등록번호");     for (int i = 0; i < page.Count; i++) { Merge(r, wc[i], r, wc[i] + 4); ws.Cell(r, wc[i]).Value = page[i][I_JUMIN]; } Box(r, 1, r, LASTCOL); r++;
-        Lbl(r, "전화번호");        for (int i = 0; i < page.Count; i++) { Merge(r, wc[i], r, wc[i] + 4); ws.Cell(r, wc[i]).Value = page[i][I_PHONE]; } Box(r, 1, r, LASTCOL); r++;
-        Lbl(r, "직종부호");        Box(r, 1, r, LASTCOL); r++;
-
-        // 근로일수 격자 (1~31, 근로일에 "O")
-        int gridTop = r;
-        Merge(gridTop, 1, gridTop + 6, 1); Lbl(gridTop, "근로일수\n(\"O\"표시)");
-        ws.Cell(gridTop, 1).Style.Alignment.WrapText = true;
-        for (int gr = 0; gr < 7; gr++)      // 7행 × 5열 = 35칸(1~31)
-        {
-            for (int i = 0; i < page.Count; i++)
-            {
-                var (_, _, _, _, _, worked) = GoyongAgg(page[i]);
-                for (int gcCol = 0; gcCol < 5; gcCol++)
-                {
-                    int day = gr * 5 + gcCol + 1;
-                    if (day > 31) continue;
-                    var c = ws.Cell(gridTop + gr, wc[i] + gcCol);
-                    c.Value = worked.Contains(day) ? $"{day} O" : day.ToString();
-                    c.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
-                    c.Style.Font.FontSize = 8;
-                    if (worked.Contains(day)) c.Style.Font.Bold = true;
-                }
-            }
-        }
-        Box(gridTop, 1, gridTop + 6, LASTCOL); r = gridTop + 7;
-
-        // 집계
-        void Agg(int row, string label, Func<(int days, double avgH, long pay, long tax, long minTax, HashSet<int> w), string> fmt)
-        {
-            Lbl(row, label);
-            for (int i = 0; i < page.Count; i++) { Merge(row, wc[i], row, wc[i] + 4); ws.Cell(row, wc[i]).Value = fmt(GoyongAgg(page[i])); ws.Cell(row, wc[i]).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center; }
-            Box(row, 1, row, LASTCOL);
-        }
-        Agg(r++, "근로일수 / 일평균근로시간", a => $"{a.days}일 / {a.avgH:0.#}시간");
-        Agg(r++, "보수지급기초일수", a => $"{a.days}일");
-        Agg(r++, "보수총액", a => $"{a.pay:N0}원");
-        Agg(r++, "임금총액", a => $"{a.pay:N0}원");
-        Agg(r++, "이직사유 코드", _ => "");
-        Lbl(r, "국세청 일용근로소득신고"); Box(r, 1, r, LASTCOL); r++;
-        Agg(r++, "  지급월", _ => $"{_month}월");
-        Agg(r++, "  총지급액(과세소득)", a => $"{a.pay:N0}원");
-        Agg(r++, "  비과세소득", _ => "0원");
-        Agg(r++, "  소득세", a => $"{a.tax:N0}원");
-        Agg(r++, "  지방소득세", a => $"{a.minTax:N0}원");
-
-        // 서식
-        ws.Column(1).Width = 16;
-        for (int c = 2; c <= LASTCOL; c++) ws.Column(c).Width = 4.6;
-        ws.Range(infoTop, 1, r - 1, LASTCOL).Style.Font.FontSize = 9;
-        ws.PageSetup.PageOrientation = XLPageOrientation.Landscape;
-        ws.PageSetup.FitToPages(1, 1);
     }
 
     // ── 헬퍼 ─────────────────────────────────────────────
